@@ -53,14 +53,13 @@ pub fn run() -> Result<()> {
             break;
         }
 
-        // Handle suspend reasons
         match app.wants_suspend.take() {
-            Some(SuspendReason::InsertCommit) => {
-                handle_insert_suspend(&mut app)?;
+            Some(SuspendReason::InsertAtHead) => handle_insert_at_head(&mut app)?,
+            Some(SuspendReason::InsertAboveCursor { hash }) => {
+                handle_insert_above(&mut app, &hash)?
             }
-            Some(SuspendReason::RebaseConflict) => {
-                handle_rebase_suspend(&mut app)?;
-            }
+            Some(SuspendReason::EditCommit { hash }) => handle_edit_commit(&mut app, &hash)?,
+            Some(SuspendReason::RebaseConflict) => handle_rebase_conflict(&mut app)?,
             None => break,
         }
     }
@@ -68,92 +67,177 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
-/// Suspend the TUI for the user to create a new commit.
-fn handle_insert_suspend(app: &mut App) -> Result<()> {
-    println!("\n\x1b[1;36m┌─ pilegit: insert commit ─────────────────────┐\x1b[0m");
-    println!("\x1b[1;36m│\x1b[0m                                               \x1b[1;36m│\x1b[0m");
-    println!("\x1b[1;36m│\x1b[0m  Make your changes and commit with:            \x1b[1;36m│\x1b[0m");
-    println!("\x1b[1;36m│\x1b[0m    \x1b[1;33mgit add <files> && git commit -m \"...\"\x1b[0m      \x1b[1;36m│\x1b[0m");
-    println!("\x1b[1;36m│\x1b[0m                                               \x1b[1;36m│\x1b[0m");
-    println!("\x1b[1;36m│\x1b[0m  Press \x1b[1;32mEnter\x1b[0m when done to return to pilegit.   \x1b[1;36m│\x1b[0m");
-    println!("\x1b[1;36m└───────────────────────────────────────────────┘\x1b[0m\n");
-    io::stdout().flush()?;
+// -------------------------------------------------------------------
+// Suspend handlers — each prints instructions, waits, then resumes
+// -------------------------------------------------------------------
 
-    // Wait for Enter
+fn print_box(color: &str, title: &str, lines: &[&str]) {
+    let width = 55;
+    let bar = "─".repeat(width - 2);
+    println!("\n\x1b[1;{color}m┌─ {title} {bar}\x1b[0m");
+    for line in lines {
+        println!("\x1b[1;{color}m│\x1b[0m  {line}");
+    }
+    println!("\x1b[1;{color}m└{bar}──\x1b[0m\n");
+}
+
+fn wait_for_enter() -> Result<()> {
+    io::stdout().flush()?;
     let mut buf = String::new();
     io::stdin().read_line(&mut buf)?;
-
-    // Reload the stack from git
-    match app.reload_stack() {
-        Ok(()) => app.status_msg = "Stack refreshed with new commits.".into(),
-        Err(e) => app.status_msg = format!("Failed to reload: {}", e),
-    }
-
     Ok(())
 }
 
-/// Suspend the TUI for the user to resolve rebase conflicts.
-fn handle_rebase_suspend(app: &mut App) -> Result<()> {
+fn handle_insert_at_head(app: &mut App) -> Result<()> {
+    print_box(
+        "36",
+        "pilegit: insert commit at top",
+        &[
+            "Make your changes and commit:",
+            "",
+            "  \x1b[1;33mgit add <files>\x1b[0m",
+            "  \x1b[1;33mgit commit -m \"your message\"\x1b[0m",
+            "",
+            "Press \x1b[1;32mEnter\x1b[0m when done to return to pilegit.",
+        ],
+    );
+    wait_for_enter()?;
+    match app.reload_stack() {
+        Ok(()) => app.set_status("Stack refreshed with new commit."),
+        Err(e) => app.set_status(format!("Reload failed: {}", e)),
+    }
+    Ok(())
+}
+
+fn handle_insert_above(app: &mut App, hash: &str) -> Result<()> {
+    // Start an interactive rebase with a break after the target commit
+    let repo = Repo::open()?;
+    match repo.rebase_break_after(hash) {
+        Ok(_) => {
+            print_box(
+                "36",
+                &format!("pilegit: insert commit above {}", hash),
+                &[
+                    "Rebase paused. Make your changes and commit:",
+                    "",
+                    "  \x1b[1;33mgit add <files>\x1b[0m",
+                    "  \x1b[1;33mgit commit -m \"your message\"\x1b[0m",
+                    "",
+                    "Press \x1b[1;32mEnter\x1b[0m when done. pilegit will continue the rebase.",
+                ],
+            );
+            wait_for_enter()?;
+
+            // Continue the rebase to replay remaining commits
+            match repo.rebase_continue() {
+                Ok(true) => {
+                    app.reload_stack()?;
+                    app.set_status("Inserted commit and rebased successfully.");
+                }
+                Ok(false) => {
+                    // Conflicts during rebase — enter conflict handler
+                    app.set_status("Conflict during rebase after insert.");
+                    app.wants_suspend = Some(SuspendReason::RebaseConflict);
+                }
+                Err(e) => app.set_status(format!("Rebase continue failed: {}", e)),
+            }
+        }
+        Err(e) => app.set_status(format!("Insert failed: {}", e)),
+    }
+    Ok(())
+}
+
+fn handle_edit_commit(app: &mut App, hash: &str) -> Result<()> {
+    // Start an interactive rebase with the target commit marked as "edit"
+    let repo = Repo::open()?;
+    match repo.rebase_edit_commit(hash) {
+        Ok(true) => {
+            // Rebase completed without stopping — commit wasn't in range
+            app.set_status("Commit not found in stack range.");
+        }
+        Ok(false) => {
+            // Rebase paused at the commit for editing
+            print_box(
+                "33",
+                &format!("pilegit: editing commit {}", hash),
+                &[
+                    "Rebase paused at this commit. Make your changes:",
+                    "",
+                    "  \x1b[1;33mgit add <files>\x1b[0m",
+                    "  \x1b[1;33mgit commit --amend\x1b[0m",
+                    "",
+                    "Press \x1b[1;32mEnter\x1b[0m when done. pilegit will rebase the rest.",
+                ],
+            );
+            wait_for_enter()?;
+
+            // Continue the rebase to replay remaining commits
+            match repo.rebase_continue() {
+                Ok(true) => {
+                    app.reload_stack()?;
+                    app.set_status("Commit edited and rebased successfully.");
+                }
+                Ok(false) => {
+                    // Conflicts — enter conflict handler
+                    app.set_status("Conflict during rebase after edit.");
+                    app.wants_suspend = Some(SuspendReason::RebaseConflict);
+                }
+                Err(e) => app.set_status(format!("Rebase continue failed: {}", e)),
+            }
+        }
+        Err(e) => app.set_status(format!("Edit failed: {}", e)),
+    }
+    Ok(())
+}
+
+fn handle_rebase_conflict(app: &mut App) -> Result<()> {
     loop {
-        // Show conflict information
         let repo = Repo::open()?;
         let conflicts = repo.conflicted_files().unwrap_or_default();
 
-        println!("\n\x1b[1;31m┌─ pilegit: rebase conflict ────────────────────┐\x1b[0m");
-        println!("\x1b[1;31m│\x1b[0m                                               \x1b[1;31m│\x1b[0m");
+        let mut lines: Vec<String> = vec![];
         if conflicts.is_empty() {
-            println!("\x1b[1;31m│\x1b[0m  No remaining conflicts detected.             \x1b[1;31m│\x1b[0m");
+            lines.push("No remaining conflicts detected.".into());
         } else {
-            println!("\x1b[1;31m│\x1b[0m  Conflicting files:                           \x1b[1;31m│\x1b[0m");
+            lines.push("Conflicting files:".into());
             for f in &conflicts {
-                println!("\x1b[1;31m│\x1b[0m    \x1b[1;33m{}\x1b[0m", f);
+                lines.push(format!("  \x1b[1;33m{}\x1b[0m", f));
             }
         }
-        println!("\x1b[1;31m│\x1b[0m                                               \x1b[1;31m│\x1b[0m");
-        println!("\x1b[1;31m│\x1b[0m  Resolve conflicts, then stage with:           \x1b[1;31m│\x1b[0m");
-        println!("\x1b[1;31m│\x1b[0m    \x1b[1;33mgit add <resolved files>\x1b[0m                   \x1b[1;31m│\x1b[0m");
-        println!("\x1b[1;31m│\x1b[0m                                               \x1b[1;31m│\x1b[0m");
-        println!("\x1b[1;31m│\x1b[0m  Then press:                                  \x1b[1;31m│\x1b[0m");
-        println!("\x1b[1;31m│\x1b[0m    \x1b[1;32mc\x1b[0m = continue rebase                       \x1b[1;31m│\x1b[0m");
-        println!("\x1b[1;31m│\x1b[0m    \x1b[1;31ma\x1b[0m = abort rebase                          \x1b[1;31m│\x1b[0m");
-        println!("\x1b[1;31m└───────────────────────────────────────────────┘\x1b[0m\n");
-        io::stdout().flush()?;
+        lines.push(String::new());
+        lines.push("Resolve conflicts, then stage:".into());
+        lines.push("  \x1b[1;33mgit add <resolved files>\x1b[0m".into());
+        lines.push(String::new());
+        lines.push("Then press:".into());
+        lines.push("  \x1b[1;32mc\x1b[0m = continue rebase".into());
+        lines.push("  \x1b[1;31ma\x1b[0m = abort rebase".into());
+
+        let line_refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
+        print_box("31", "pilegit: rebase conflict", &line_refs);
 
         print!("  > ");
         io::stdout().flush()?;
 
         let mut buf = String::new();
         io::stdin().read_line(&mut buf)?;
-        let choice = buf.trim();
 
-        match choice {
-            "c" => {
-                match app.continue_rebase() {
-                    Ok(true) => {
-                        // Rebase complete
-                        app.status_msg = "Rebase completed successfully.".into();
-                        return Ok(());
-                    }
-                    Ok(false) => {
-                        // More conflicts — loop again
-                        continue;
-                    }
-                    Err(e) => {
-                        app.status_msg = format!("Rebase continue failed: {}", e);
-                        return Ok(());
-                    }
+        match buf.trim() {
+            "c" => match app.continue_rebase() {
+                Ok(true) => return Ok(()),
+                Ok(false) => continue,
+                Err(e) => {
+                    app.set_status(format!("Rebase continue failed: {}", e));
+                    return Ok(());
                 }
-            }
+            },
             "a" => {
                 match app.abort_rebase() {
-                    Ok(()) => app.status_msg = "Rebase aborted.".into(),
-                    Err(e) => app.status_msg = format!("Rebase abort failed: {}", e),
+                    Ok(()) => {}
+                    Err(e) => app.set_status(format!("Abort failed: {}", e)),
                 }
                 return Ok(());
             }
-            _ => {
-                println!("  Invalid choice. Press 'c' to continue or 'a' to abort.");
-            }
+            _ => println!("  Press 'c' to continue or 'a' to abort."),
         }
     }
 }
