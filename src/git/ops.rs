@@ -102,6 +102,90 @@ impl Repo {
         self.git(&["show", "--format=", hash])
     }
 
+    /// Start a rebase onto the base branch.
+    /// Returns Ok(true) if clean, Ok(false) if conflicts need resolving.
+    pub fn rebase_onto_base(&self) -> Result<bool> {
+        let base = self.detect_base()?;
+        let result = Command::new("git")
+            .current_dir(&self.workdir)
+            .args(["rebase", &base])
+            .output()?;
+
+        if result.status.success() {
+            return Ok(true);
+        }
+
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        // "CONFLICT" in stderr means merge conflicts
+        if stderr.contains("CONFLICT") || stderr.contains("could not apply") {
+            return Ok(false);
+        }
+        Err(eyre!("Rebase failed: {}", stderr))
+    }
+
+    /// Continue a rebase after conflicts have been resolved and staged.
+    /// Returns Ok(true) if rebase completed, Ok(false) if more conflicts.
+    pub fn rebase_continue(&self) -> Result<bool> {
+        let result = Command::new("git")
+            .current_dir(&self.workdir)
+            .env("GIT_EDITOR", "true") // auto-accept commit messages
+            .args(["rebase", "--continue"])
+            .output()?;
+
+        if result.status.success() {
+            return Ok(true);
+        }
+
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        if stderr.contains("CONFLICT") || stderr.contains("could not apply") {
+            return Ok(false);
+        }
+        Err(eyre!("Rebase continue failed: {}", stderr))
+    }
+
+    /// Abort an in-progress rebase.
+    pub fn rebase_abort(&self) -> Result<()> {
+        self.git(&["rebase", "--abort"])?;
+        Ok(())
+    }
+
+    /// Check if a rebase is currently in progress.
+    pub fn is_rebase_in_progress(&self) -> bool {
+        self.workdir.join(".git/rebase-merge").exists()
+            || self.workdir.join(".git/rebase-apply").exists()
+    }
+
+    /// Get the list of files with conflicts (unmerged paths).
+    pub fn conflicted_files(&self) -> Result<Vec<String>> {
+        let output = self.git(&["diff", "--name-only", "--diff-filter=U"])?;
+        Ok(output
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect())
+    }
+
+    /// Run a user-defined submit command for the commit at HEAD~n.
+    /// The command string can contain `{hash}` and `{subject}` placeholders.
+    pub fn run_submit_cmd(&self, cmd_template: &str, hash: &str, subject: &str) -> Result<String> {
+        let cmd = cmd_template
+            .replace("{hash}", hash)
+            .replace("{subject}", subject);
+
+        let result = Command::new("sh")
+            .current_dir(&self.workdir)
+            .args(["-c", &cmd])
+            .output()?;
+
+        let stdout = String::from_utf8_lossy(&result.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&result.stderr).to_string();
+
+        if !result.status.success() {
+            return Err(eyre!("Submit command failed: {}{}", stdout, stderr));
+        }
+        Ok(format!("{}{}", stdout, stderr))
+    }
+
     /// Run a git command inside this repo's workdir.
     fn git(&self, args: &[&str]) -> Result<String> {
         git_in(&self.workdir, args)
