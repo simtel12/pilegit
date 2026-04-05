@@ -103,7 +103,7 @@ impl App {
     /// Shortcut hints for the current mode (always shown at bottom).
     pub fn shortcuts(&self) -> &str {
         match &self.mode {
-            Mode::Normal => "↑k/↓j:move  V/Shift+↑↓:select  Alt+↑↓:reorder  e:edit  i:insert  x:remove  d:diff  r:rebase  p:submit  u:undo  Ctrl+r:redo  ?:help  q:quit",
+            Mode::Normal => "↑k/↓j:move  V/Shift+↑↓:select  Ctrl+↑↓:reorder  e:edit  i:insert  x:remove  d:diff  r:rebase  p:submit  u:undo  Ctrl+r:redo  ?:help  q:quit",
             Mode::Select => "Shift+↑↓ or j/k:extend selection  s:squash  Esc:cancel",
             Mode::DiffView => "↑k/↓j:scroll  Ctrl+d/u:half-page  q/Esc:back",
             Mode::HistoryView => "q/Esc:back",
@@ -130,15 +130,15 @@ impl App {
                    (opens your editor to rewrite the message)
    Esc             Cancel selection
 
- REORDER
-   Alt + ↑ / k     Move patch up (toward newer)
-   Alt + ↓ / j     Move patch down (toward older)
+ REORDER (modifies git history, checks for conflicts)
+   Ctrl + ↑ / k    Move patch up (toward newer)
+   Ctrl + ↓ / j    Move patch down (toward older)
 
- EDITING
+ EDITING (modifies git history)
    e               Edit the commit at cursor
-                   (suspends TUI — make changes, press Enter to amend)
+                   (make changes, press Enter — auto stages + amends + rebases)
    i               Insert a new commit (choose: after cursor or at top)
-   x               Remove the commit at cursor (confirms first)
+   x               Remove the commit from git history (confirms first)
 
  STACK OPERATIONS
    r               Rebase entire stack onto base branch
@@ -217,21 +217,58 @@ impl App {
         }
     }
 
+    /// Move patch at cursor visually upward by swapping in git history.
+    /// If it creates a conflict, enters conflict resolution flow.
     pub fn move_patch_up(&mut self) {
-        if !self.stack.is_empty() && self.cursor < self.stack.len() - 1 {
-            let _ = self.stack.reorder(self.cursor, self.cursor + 1);
-            self.cursor += 1;
-            self.record("move patch up");
-            self.notify("Patch moved up.");
+        if self.stack.is_empty() || self.cursor >= self.stack.len() - 1 {
+            return;
+        }
+        let hash_below = self.short_hash(self.cursor);
+        let hash_above = self.short_hash(self.cursor + 1);
+        self.notify("Reordering...");
+
+        match crate::git::ops::Repo::open().and_then(|r| r.swap_commits(&hash_below, &hash_above)) {
+            Ok(true) => {
+                if let Err(e) = self.reload_stack() {
+                    self.notify(format!("Reload failed: {}", e));
+                    return;
+                }
+                self.cursor += 1;
+                self.clamp_cursor();
+                self.notify("Patch moved up.");
+            }
+            Ok(false) => {
+                self.notify("Conflict while reordering.");
+                self.wants_suspend = Some(SuspendReason::RebaseConflict);
+            }
+            Err(e) => self.notify(format!("Reorder failed: {}", e)),
         }
     }
 
+    /// Move patch at cursor visually downward by swapping in git history.
     pub fn move_patch_down(&mut self) {
-        if self.cursor > 0 && !self.stack.is_empty() {
-            let _ = self.stack.reorder(self.cursor, self.cursor - 1);
-            self.cursor -= 1;
-            self.record("move patch down");
-            self.notify("Patch moved down.");
+        if self.cursor == 0 || self.stack.is_empty() {
+            return;
+        }
+        let hash_below = self.short_hash(self.cursor - 1);
+        let hash_above = self.short_hash(self.cursor);
+        self.notify("Reordering...");
+
+        match crate::git::ops::Repo::open().and_then(|r| r.swap_commits(&hash_below, &hash_above)) {
+            Ok(true) => {
+                if let Err(e) = self.reload_stack() {
+                    self.notify(format!("Reload failed: {}", e));
+                    return;
+                }
+                self.cursor -= 1;
+                self.clamp_cursor();
+                self.notify("Patch moved down.");
+            }
+            Ok(false) => {
+                self.notify("Conflict while reordering.");
+                self.wants_suspend = Some(SuspendReason::RebaseConflict);
+            }
+            Err(e) => self.notify(format!("Reorder failed: {}", e)),
         }
     }
 
@@ -256,16 +293,34 @@ impl App {
         }
     }
 
+    /// Remove a commit from git history via interactive rebase.
     pub fn drop_at_cursor(&mut self) {
         if self.stack.is_empty() { return; }
-        match self.stack.drop_patch(self.cursor) {
-            Ok(dropped) => {
-                self.record("remove commit");
+        let hash = self.short_hash(self.cursor);
+        let subject = self.stack.patches[self.cursor].subject.clone();
+        self.notify("Removing...");
+
+        match crate::git::ops::Repo::open().and_then(|r| r.remove_commit(&hash)) {
+            Ok(true) => {
+                if let Err(e) = self.reload_stack() {
+                    self.notify(format!("Reload failed: {}", e));
+                    return;
+                }
                 self.clamp_cursor();
-                self.notify(format!("Removed: {}", dropped.subject));
+                self.notify(format!("Removed: {}", subject));
+            }
+            Ok(false) => {
+                self.notify("Conflict while removing commit.");
+                self.wants_suspend = Some(SuspendReason::RebaseConflict);
             }
             Err(e) => self.notify(format!("Remove failed: {}", e)),
         }
+    }
+
+    /// Get the short hash (7 chars) for the commit at a given index.
+    fn short_hash(&self, index: usize) -> String {
+        let h = &self.stack.patches[index].hash;
+        h[..7.min(h.len())].to_string()
     }
 
     /// Show the insert location prompt.
