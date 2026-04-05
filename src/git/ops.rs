@@ -143,10 +143,21 @@ impl Repo {
         Ok(())
     }
 
+    /// Fetch from origin to ensure we have the latest remote state.
+    pub fn fetch_origin(&self) -> Result<()> {
+        self.git(&["fetch", "origin"])?;
+        Ok(())
+    }
+
     /// Start a rebase onto the base branch.
+    /// Fetches from origin first to ensure we rebase onto the latest remote.
     /// Returns Ok(true) if clean, Ok(false) if conflicts need resolving.
     pub fn rebase_onto_base(&self) -> Result<bool> {
         let base = self.detect_base()?;
+
+        // Always fetch first so we rebase onto the latest remote
+        let _ = self.fetch_origin();
+
         let result = Command::new("git")
             .current_dir(&self.workdir)
             .args(["rebase", &base])
@@ -365,14 +376,120 @@ impl Repo {
             .collect())
     }
 
+    /// Submit a single commit as a GitHub PR using the `gh` CLI.
+    ///
+    /// Creates a branch `pgit/<subject>` for the commit. If the parent commit
+    /// is still in the stack, uses its branch as the PR base so the PR shows
+    /// only one commit's diff. If the parent has already been merged into main,
+    /// sets the PR base to main so it merges correctly.
+    pub fn github_submit(
+        &self,
+        commit_hash: &str,
+        subject: &str,
+        parent_hash: Option<&str>,
+        body: &str,
+    ) -> Result<String> {
+        let branch = self.get_current_branch()?;
+        let base = self.detect_base()?;
+        let base_branch = base.strip_prefix("origin/").unwrap_or(&base).to_string();
+
+        let branch_name = self.make_pgit_branch_name(commit_hash, subject);
+
+        // Create and push the commit's branch
+        self.git(&["branch", "-f", &branch_name, commit_hash])?;
+        self.git(&["push", "-f", "origin", &branch_name])?;
+
+        // Determine PR base:
+        // - If no parent in stack → base is main
+        // - If parent is already merged into main → base is main
+        // - Otherwise → base is parent's branch
+        let pr_base = if let Some(ph) = parent_hash {
+            if self.is_ancestor(ph, &base) {
+                // Parent already merged into main — PR should target main directly
+                base_branch.clone()
+            } else {
+                let parent_subject = self.git(&["log", "-1", "--format=%s", ph])?
+                    .trim().to_string();
+                let parent_branch = self.make_pgit_branch_name(ph, &parent_subject);
+                // Ensure parent branch exists and is pushed
+                self.git(&["branch", "-f", &parent_branch, ph])?;
+                self.git(&["push", "-f", "origin", &parent_branch])?;
+                parent_branch
+            }
+        } else {
+            base_branch.clone()
+        };
+
+        // Try to create PR via gh
+        let create = Command::new("gh")
+            .current_dir(&self.workdir)
+            .args([
+                "pr", "create",
+                "--head", &branch_name,
+                "--base", &pr_base,
+                "--title", subject,
+                "--body", body,
+            ])
+            .output()?;
+
+        // Checkout back to original branch
+        let _ = self.git(&["checkout", "--quiet", &branch]);
+
+        if create.status.success() {
+            let url = String::from_utf8_lossy(&create.stdout).trim().to_string();
+            return Ok(format!("PR created: {}", url));
+        }
+
+        let stderr = String::from_utf8_lossy(&create.stderr);
+        if stderr.contains("already exists") {
+            // PR exists — update its base branch in case parent was merged
+            let _ = Command::new("gh")
+                .current_dir(&self.workdir)
+                .args(["pr", "edit", &branch_name, "--base", &pr_base])
+                .output();
+            return Ok(format!("PR updated: {} (base: {})", branch_name, pr_base));
+        }
+
+        Err(eyre!("gh pr create failed: {}", stderr))
+    }
+
+    /// Check if `commit` is an ancestor of `branch` (i.e., already merged).
+    fn is_ancestor(&self, commit: &str, branch: &str) -> bool {
+        Command::new("git")
+            .current_dir(&self.workdir)
+            .args(["merge-base", "--is-ancestor", commit, branch])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    /// Generate a stable branch name like `pgit/feat-add-login`.
+    /// Does NOT include the hash so the name stays the same when the commit
+    /// is edited/amended — allowing `git push -f` to update an existing PR.
+    fn make_pgit_branch_name(&self, _hash: &str, subject: &str) -> String {
+        let sanitized: String = subject
+            .chars()
+            .map(|c| if c.is_alphanumeric() || c == '-' { c.to_ascii_lowercase() } else { '-' })
+            .collect();
+        let sanitized = sanitized.trim_matches('-');
+        let truncated = &sanitized[..50.min(sanitized.len())];
+        format!("pgit/{}", truncated.trim_end_matches('-'))
+    }
+
     /// Run a user-defined submit command for a specific commit.
     /// Temporarily checks out the target commit, runs the command, then
     /// checks out the original branch. The command template can contain
-    /// `{hash}` and `{subject}` placeholders.
-    pub fn run_submit_cmd(&self, cmd_template: &str, hash: &str, subject: &str) -> Result<String> {
+    /// `{hash}`, `{subject}`, `{message}`, and `{message_file}` placeholders.
+    pub fn run_submit_cmd(&self, cmd_template: &str, hash: &str, subject: &str, body: &str) -> Result<String> {
+        // Write message to a temp file for {message_file} placeholder
+        let msg_file = std::env::temp_dir().join(format!("pgit-submit-msg-{}.txt", std::process::id()));
+        std::fs::write(&msg_file, body)?;
+
         let cmd = cmd_template
             .replace("{hash}", hash)
-            .replace("{subject}", subject);
+            .replace("{subject}", subject)
+            .replace("{message}", body)
+            .replace("{message_file}", &msg_file.display().to_string());
 
         // Save current branch so we can return after the command
         let branch = self.get_current_branch()?;
@@ -390,6 +507,7 @@ impl Repo {
 
         // Always checkout back, even if the command failed
         let _ = self.git(&["checkout", "--quiet", &branch]);
+        let _ = std::fs::remove_file(&msg_file);
 
         if !result.status.success() {
             return Err(eyre!("Submit command failed: {}{}", stdout, stderr));
