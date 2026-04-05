@@ -9,15 +9,17 @@ use crate::core::stack::PatchStatus;
 
 /// Main render dispatch.
 pub fn render(frame: &mut Frame, app: &App) {
-    // Bottom area: 1 line notification (if any) + 1 line shortcuts
-    let status_height = if app.notification.is_some() { 2 } else { 1 };
+    let width = frame.size().width as usize;
+    let shortcut_lines = build_shortcut_lines(app.shortcuts(), width);
+    let status_height = shortcut_lines.len()
+        + if app.notification.is_some() { 1 } else { 0 };
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2),                     // header
-            Constraint::Min(5),                        // main content
-            Constraint::Length(status_height as u16),   // status bar
+            Constraint::Length(2),                         // header
+            Constraint::Min(5),                            // main content
+            Constraint::Length(status_height as u16),       // status bar
         ])
         .split(frame.size());
 
@@ -30,7 +32,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         _ => render_stack_view(frame, app, chunks[1]),
     }
 
-    render_status_bar(frame, app, chunks[2]);
+    render_status_bar(frame, app, chunks[2], shortcut_lines);
 }
 
 fn render_header(frame: &mut Frame, app: &App, area: Rect) {
@@ -337,8 +339,62 @@ fn render_help_view(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
-/// Render the bottom status bar: notification (if any) + shortcuts line.
-fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
+/// Parse a shortcut string into styled (key, action) pairs.
+fn parse_shortcut_pair(part: &str) -> Vec<Span<'static>> {
+    if let Some(colon_pos) = part.find(':') {
+        let key = &part[..colon_pos];
+        let action = &part[colon_pos + 1..];
+        vec![
+            Span::styled(key.to_string(), Style::default().fg(Color::Cyan).bold()),
+            Span::styled(format!(":{}", action), Style::default().fg(Color::DarkGray)),
+        ]
+    } else {
+        vec![Span::styled(part.to_string(), Style::default().fg(Color::DarkGray))]
+    }
+}
+
+/// Build shortcut lines that wrap at terminal width.
+fn build_shortcut_lines(shortcuts: &str, width: usize) -> Vec<Line<'static>> {
+    let sep = "  ";
+    let parts: Vec<&str> = shortcuts.split(sep).filter(|s| !s.is_empty()).collect();
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut current_spans: Vec<Span<'static>> = vec![Span::raw(" ")];
+    let mut current_width: usize = 1; // leading space
+
+    for (i, part) in parts.iter().enumerate() {
+        let part_width = if i > 0 { sep.len() + part.len() } else { part.len() };
+
+        // If adding this part overflows, start a new line
+        if i > 0 && current_width + part_width > width.saturating_sub(1) {
+            lines.push(Line::from(current_spans));
+            current_spans = vec![Span::raw(" ")];
+            current_width = 1;
+        }
+
+        // Add separator between pairs on the same line
+        if current_width > 1 {
+            current_spans.push(Span::styled(sep.to_string(), Style::default().fg(Color::DarkGray)));
+            current_width += sep.len();
+        }
+
+        current_spans.extend(parse_shortcut_pair(part));
+        current_width += part.len();
+    }
+
+    if current_spans.len() > 1 {
+        lines.push(Line::from(current_spans));
+    }
+
+    if lines.is_empty() {
+        lines.push(Line::from(" "));
+    }
+
+    lines
+}
+
+/// Render the bottom status bar: notification (if any) + wrapped shortcuts.
+fn render_status_bar(frame: &mut Frame, app: &App, area: Rect, shortcut_lines: Vec<Line<'static>>) {
     let mut lines: Vec<Line> = Vec::new();
 
     // Notification line (yellow, above shortcuts)
@@ -349,30 +405,7 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         ]));
     }
 
-    // Shortcuts line with colored keys
-    let shortcuts_text = app.shortcuts();
-    let mut spans = vec![Span::raw(" ")];
-    for part in shortcuts_text.split("  ") {
-        if part.is_empty() { continue; }
-        if !spans.is_empty() && spans.len() > 1 {
-            spans.push(Span::styled("  ", Style::default().fg(Color::DarkGray)));
-        }
-        if let Some(colon_pos) = part.find(':') {
-            let key = &part[..colon_pos];
-            let action = &part[colon_pos + 1..];
-            spans.push(Span::styled(
-                key.to_string(),
-                Style::default().fg(Color::Cyan).bold(),
-            ));
-            spans.push(Span::styled(
-                format!(":{}", action),
-                Style::default().fg(Color::DarkGray),
-            ));
-        } else {
-            spans.push(Span::styled(part.to_string(), Style::default().fg(Color::DarkGray)));
-        }
-    }
-    lines.push(Line::from(spans));
+    lines.extend(shortcut_lines);
 
     frame.render_widget(Paragraph::new(lines), area);
 }

@@ -54,7 +54,8 @@ fn ensure_config() -> Result<()> {
 
 fn cmd_init() -> Result<()> {
     let repo = git::ops::Repo::open()?;
-    core::config::run_setup(&repo.workdir)?;
+    let config = core::config::run_setup(&repo.workdir)?;
+    core::config::check_dependencies(&config);
     Ok(())
 }
 

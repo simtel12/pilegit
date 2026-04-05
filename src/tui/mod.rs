@@ -39,6 +39,9 @@ pub fn run() -> Result<()> {
         });
     let f = forge::create_forge(&config);
 
+    // Check that required CLI tools are installed
+    crate::core::config::check_dependencies(&config);
+
     // Mark submitted status via the forge
     f.mark_submitted(&repo, &mut commits);
 

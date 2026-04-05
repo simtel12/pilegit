@@ -41,9 +41,6 @@ pub trait Forge {
         on_progress: &dyn Fn(&str),
     ) -> Result<Vec<String>>;
 
-    /// Whether this forge uses named branches for PRs.
-    fn uses_branches(&self) -> bool { true }
-
     /// Whether pilegit should open an editor for the description before submit.
     /// Platforms like Phabricator have their own editor flow.
     fn needs_description_editor(&self) -> bool { true }

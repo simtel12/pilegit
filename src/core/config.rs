@@ -128,3 +128,82 @@ pub fn run_setup(repo_root: &Path) -> Result<Config> {
 
     Ok(config)
 }
+
+/// Check that required CLI tools are installed and print warnings.
+/// Returns Ok(()) always — warnings are non-fatal.
+pub fn check_dependencies(config: &Config) {
+    let mut ok = true;
+
+    // git is always required
+    match get_tool_version("git", &["--version"]) {
+        Some(v) => {
+            if let Some(major_minor) = parse_version(&v) {
+                if major_minor < (2, 26) {
+                    eprintln!("  \x1b[33m⚠ git {} found — pgit requires git 2.26+\x1b[0m", v);
+                    ok = false;
+                }
+            }
+        }
+        None => {
+            eprintln!("  \x1b[31m✗ git not found. pgit requires git.\x1b[0m");
+            ok = false;
+        }
+    }
+
+    // Platform-specific CLI
+    let (tool, min_ver, install_hint) = match config.forge.forge_type.as_str() {
+        "github" => ("gh", (2, 0), "https://cli.github.com/"),
+        "gitlab" => ("glab", (1, 20), "https://gitlab.com/gitlab-org/cli"),
+        "gitea" => ("tea", (0, 9), "https://gitea.com/gitea/tea"),
+        "phabricator" => ("arc", (0, 0), "arcanist"),
+        _ => return, // custom — no CLI dependency
+    };
+
+    match get_tool_version(tool, &["--version"]) {
+        Some(v) => {
+            if min_ver != (0, 0) {
+                if let Some(major_minor) = parse_version(&v) {
+                    if major_minor < min_ver {
+                        eprintln!(
+                            "  \x1b[33m⚠ {} {} found — pgit recommends {}.{}+\x1b[0m",
+                            tool, v, min_ver.0, min_ver.1
+                        );
+                        ok = false;
+                    }
+                }
+            }
+        }
+        None => {
+            eprintln!(
+                "  \x1b[31m✗ `{}` not found. Install it: {}\x1b[0m",
+                tool, install_hint
+            );
+            ok = false;
+        }
+    }
+
+    if ok {
+        return; // all good, no output
+    }
+    eprintln!();
+}
+
+/// Run `tool --version` and return the raw output string.
+fn get_tool_version(tool: &str, args: &[&str]) -> Option<String> {
+    std::process::Command::new(tool)
+        .args(args)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+}
+
+/// Parse a major.minor version from a version string like "git version 2.43.0".
+fn parse_version(version_str: &str) -> Option<(u32, u32)> {
+    let digits_start = version_str.find(|c: char| c.is_ascii_digit())?;
+    let version_part = &version_str[digits_start..];
+    let mut parts = version_part.split('.');
+    let major = parts.next()?.parse::<u32>().ok()?;
+    let minor = parts.next()?.parse::<u32>().ok()?;
+    Some((major, minor))
+}

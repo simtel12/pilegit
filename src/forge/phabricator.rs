@@ -17,7 +17,6 @@ pub struct Phabricator;
 
 impl Forge for Phabricator {
     fn name(&self) -> &str { "Phabricator" }
-    fn uses_branches(&self) -> bool { false }
     fn needs_description_editor(&self) -> bool { false }
 
     fn submit(
