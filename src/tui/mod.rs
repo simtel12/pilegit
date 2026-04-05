@@ -3,6 +3,7 @@ pub mod input;
 pub mod ui;
 
 use std::io::{self, Write};
+use std::process::Command;
 
 use color_eyre::Result;
 use crossterm::{
@@ -18,6 +19,7 @@ use app::{App, SuspendReason};
 
 pub type Tui = Terminal<CrosstermBackend<io::Stdout>>;
 
+/// Launch the interactive TUI with suspend/resume support.
 pub fn run() -> Result<()> {
     let repo = Repo::open()?;
     let base = repo.detect_base()?;
@@ -26,12 +28,14 @@ pub fn run() -> Result<()> {
     let mut app = App::new(stack);
 
     loop {
+        // Initialize terminal
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         execute!(stdout, EnterAlternateScreen)?;
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
 
+        // Restore terminal on panic
         let original_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |panic| {
             let _ = disable_raw_mode();
@@ -39,8 +43,10 @@ pub fn run() -> Result<()> {
             original_hook(panic);
         }));
 
+        // Run the TUI until quit or suspend
         app.run(&mut terminal)?;
 
+        // Restore terminal
         disable_raw_mode()?;
         execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
 
@@ -48,12 +54,15 @@ pub fn run() -> Result<()> {
             break;
         }
 
+        // Handle the suspend reason
         match app.wants_suspend.take() {
             Some(SuspendReason::InsertAtHead) => handle_insert_at_head(&mut app)?,
-            Some(SuspendReason::InsertAboveCursor { hash }) => handle_insert_above(&mut app, &hash)?,
+            Some(SuspendReason::InsertAfterCursor { hash }) => {
+                handle_insert_after(&mut app, &hash)?;
+            }
             Some(SuspendReason::EditCommit { hash }) => handle_edit_commit(&mut app, &hash)?,
             Some(SuspendReason::EditSquashMessage { patch_index }) => {
-                handle_edit_squash_message(&mut app, patch_index)?
+                handle_edit_squash_message(&mut app, patch_index)?;
             }
             Some(SuspendReason::RebaseConflict) => handle_rebase_conflict(&mut app)?,
             None => break,
@@ -83,10 +92,18 @@ fn wait_for_enter() -> Result<()> {
     Ok(())
 }
 
+fn get_editor() -> String {
+    // Prefer $EDITOR, fall back to nano (more common/beginner-friendly than vi)
+    std::env::var("EDITOR")
+        .or_else(|_| std::env::var("VISUAL"))
+        .unwrap_or_else(|_| "nano".to_string())
+}
+
 // -------------------------------------------------------------------
 // Suspend handlers
 // -------------------------------------------------------------------
 
+/// Insert a new commit at the top of the stack (HEAD).
 fn handle_insert_at_head(app: &mut App) -> Result<()> {
     print_box("36", "pilegit: insert commit at top", &[
         "Make your changes and commit:",
@@ -97,22 +114,23 @@ fn handle_insert_at_head(app: &mut App) -> Result<()> {
     ]);
     wait_for_enter()?;
     match app.reload_stack() {
-        Ok(()) => app.notify("Stack refreshed with new commit."),
+        Ok(()) => app.notify("Stack refreshed."),
         Err(e) => app.notify(format!("Reload failed: {}", e)),
     }
     Ok(())
 }
 
-fn handle_insert_above(app: &mut App, hash: &str) -> Result<()> {
+/// Insert a new commit after the cursor position using rebase --break.
+fn handle_insert_after(app: &mut App, hash: &str) -> Result<()> {
     let repo = Repo::open()?;
     match repo.rebase_break_after(hash) {
         Ok(_) => {
-            print_box("36", &format!("pilegit: insert above {}", hash), &[
+            print_box("36", &format!("pilegit: insert after {}", hash), &[
                 "Rebase paused. Make your changes and commit:",
                 "",
                 "  \x1b[1;33mgit add <files> && git commit -m \"...\"\x1b[0m",
                 "",
-                "Press \x1b[1;32mEnter\x1b[0m when done. pilegit will continue the rebase.",
+                "Press \x1b[1;32mEnter\x1b[0m when done. pilegit will rebase the rest.",
             ]);
             wait_for_enter()?;
             match repo.rebase_continue() {
@@ -132,24 +150,54 @@ fn handle_insert_above(app: &mut App, hash: &str) -> Result<()> {
     Ok(())
 }
 
+/// Edit/amend a specific commit.
+/// Pauses the rebase at the commit, lets the user make changes, then
+/// auto-stages and amends when the user presses Enter.
 fn handle_edit_commit(app: &mut App, hash: &str) -> Result<()> {
     let repo = Repo::open()?;
     match repo.rebase_edit_commit(hash) {
-        Ok(true) => app.notify("Commit not found in stack range."),
+        Ok(true) => {
+            app.notify("Commit not found in stack range.");
+        }
         Ok(false) => {
-            print_box("33", &format!("pilegit: editing {}", hash), &[
-                "Rebase paused at this commit. Make your changes:",
+            // Rebase paused at the target commit
+            print_box("33", &format!("pilegit: editing commit {}", hash), &[
+                "Rebase is paused at this commit.",
+                "Make your changes to the code now.",
                 "",
-                "  \x1b[1;33mgit add <files>\x1b[0m",
-                "  \x1b[1;33mgit commit --amend\x1b[0m",
+                "When you press \x1b[1;32mEnter\x1b[0m, pilegit will:",
+                "  1. Stage all changes  (git add -A)",
+                "  2. Amend this commit  (git commit --amend --no-edit)",
+                "  3. Rebase the remaining commits on top",
                 "",
-                "Press \x1b[1;32mEnter\x1b[0m when done. pilegit will rebase the rest.",
+                "Press \x1b[1;32mEnter\x1b[0m when ready.",
             ]);
             wait_for_enter()?;
+
+            // Auto-stage and amend
+            println!("  Staging and amending...");
+            let _ = Command::new("git")
+                .current_dir(&repo.workdir)
+                .args(["add", "-A"])
+                .output();
+            let amend = Command::new("git")
+                .current_dir(&repo.workdir)
+                .args(["commit", "--amend", "--no-edit"])
+                .output()?;
+
+            if !amend.status.success() {
+                let stderr = String::from_utf8_lossy(&amend.stderr);
+                // "nothing to commit" is fine — user may not have changed anything
+                if !stderr.contains("nothing to commit") {
+                    app.notify(format!("Amend warning: {}", stderr.trim()));
+                }
+            }
+
+            // Continue the rebase to replay remaining commits
             match repo.rebase_continue() {
                 Ok(true) => {
                     app.reload_stack()?;
-                    app.notify("Commit edited and rebased.");
+                    app.notify("Commit edited and rebased successfully.");
                 }
                 Ok(false) => {
                     app.notify("Conflict during rebase after edit.");
@@ -163,9 +211,10 @@ fn handle_edit_commit(app: &mut App, hash: &str) -> Result<()> {
     Ok(())
 }
 
+/// After squashing, open an editor so the user can rewrite the commit message.
 fn handle_edit_squash_message(app: &mut App, patch_index: usize) -> Result<()> {
     if patch_index >= app.stack.len() {
-        app.notify("Squash message edit: invalid patch index.");
+        app.notify("Invalid patch index for message edit.");
         return Ok(());
     }
 
@@ -176,21 +225,30 @@ fn handle_edit_squash_message(app: &mut App, patch_index: usize) -> Result<()> {
         format!("{}\n\n{}\n", patch.subject, patch.body)
     };
 
-    // Write to temp file
+    // Write initial content to a temp file
     let tmp_path = std::env::temp_dir().join(format!("pgit-squash-msg-{}.txt", std::process::id()));
     std::fs::write(&tmp_path, &initial_content)?;
 
-    // Open $EDITOR (or vi as fallback)
-    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
-    println!("\n  Opening {} to edit the squashed commit message...\n", editor);
+    let editor = get_editor();
+    println!();
+    print_box("36", "pilegit: edit squash message", &[
+        "Opening your editor to rewrite the combined commit message.",
+        "",
+        &format!("  Editor: \x1b[1;33m{}\x1b[0m", editor),
+        "",
+        "  First line = commit subject",
+        "  Remaining lines = commit body",
+        "",
+        "  Save and close the editor when done.",
+    ]);
 
-    let status = std::process::Command::new(&editor)
+    let status = Command::new(&editor)
         .arg(&tmp_path)
         .status();
 
     match status {
         Ok(s) if s.success() => {
-            // Read back
+            // Read back the edited message
             let edited = std::fs::read_to_string(&tmp_path)?;
             let _ = std::fs::remove_file(&tmp_path);
 
@@ -203,11 +261,7 @@ fn handle_edit_squash_message(app: &mut App, patch_index: usize) -> Result<()> {
             // First line = subject, rest = body
             let mut lines = edited.lines();
             let subject = lines.next().unwrap_or("").to_string();
-            let body: String = lines
-                .collect::<Vec<&str>>()
-                .join("\n")
-                .trim()
-                .to_string();
+            let body: String = lines.collect::<Vec<&str>>().join("\n").trim().to_string();
 
             app.stack.patches[patch_index].subject = subject;
             app.stack.patches[patch_index].body = body;
@@ -226,6 +280,7 @@ fn handle_edit_squash_message(app: &mut App, patch_index: usize) -> Result<()> {
     Ok(())
 }
 
+/// Handle rebase conflicts — loop until resolved or aborted.
 fn handle_rebase_conflict(app: &mut App) -> Result<()> {
     loop {
         let repo = Repo::open()?;
@@ -259,7 +314,10 @@ fn handle_rebase_conflict(app: &mut App) -> Result<()> {
             "c" => match app.continue_rebase() {
                 Ok(true) => return Ok(()),
                 Ok(false) => continue,
-                Err(e) => { app.notify(format!("Continue failed: {}", e)); return Ok(()); }
+                Err(e) => {
+                    app.notify(format!("Continue failed: {}", e));
+                    return Ok(());
+                }
             },
             "a" => {
                 let _ = app.abort_rebase();
