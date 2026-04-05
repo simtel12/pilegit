@@ -16,6 +16,7 @@ This installs the `pgit` binary.
 
 Testing edit
 
+more edit testing
 ## Quick Start
 
 ```bash
