@@ -30,6 +30,23 @@ impl Repo {
         ))
     }
 
+    /// Get the current HEAD commit hash (full).
+    pub fn get_head_hash(&self) -> Result<String> {
+        Ok(self.git(&["rev-parse", "HEAD"])?.trim().to_string())
+    }
+
+    /// Get the current branch name.
+    pub fn get_current_branch(&self) -> Result<String> {
+        Ok(self.git(&["rev-parse", "--abbrev-ref", "HEAD"])?.trim().to_string())
+    }
+
+    /// Hard-reset the current branch to a specific commit.
+    /// Used by undo/redo to restore git history.
+    pub fn reset_hard(&self, hash: &str) -> Result<()> {
+        self.git(&["reset", "--hard", hash])?;
+        Ok(())
+    }
+
     /// List commits between base and HEAD, bottom-of-stack first.
     ///
     /// Uses a record separator (%x1e) between commits and a unit separator
@@ -183,7 +200,7 @@ impl Repo {
     pub fn rebase_edit_commit(&self, short_hash: &str) -> Result<bool> {
         let base = self.detect_base()?;
         let sed_cmd = format!(
-            "sed -i 's/^pick {} /edit {} /'",
+            "sed -i 's/^pick {}/edit {}/'",
             short_hash, short_hash
         );
         let _result = Command::new("git")
@@ -205,7 +222,7 @@ impl Repo {
     pub fn rebase_break_after(&self, short_hash: &str) -> Result<bool> {
         let base = self.detect_base()?;
         let sed_cmd = format!(
-            "sed -i '/^pick {} /a break'",
+            "sed -i '/^pick {}/a break'",
             short_hash
         );
         let _result = Command::new("git")
@@ -226,7 +243,7 @@ impl Repo {
         let base = self.detect_base()?;
         // Change "pick <hash>" to "drop <hash>" in the rebase todo
         let sed_cmd = format!(
-            "sed -i 's/^pick {} /drop {} /'",
+            "sed -i 's/^pick {}/drop {}/'",
             short_hash, short_hash
         );
         let result = Command::new("git")
@@ -261,7 +278,7 @@ impl Repo {
         // 1. When we see the line for hash_below, hold it and delete
         // 2. When we see the line for hash_above, print it, then print the held line
         let sed_cmd = format!(
-            "sed -i '/^pick {} /{{ h; d }}; /^pick {} /{{ p; x }}'",
+            "sed -i '/^pick {}/{{ h; d }}; /^pick {}/{{ p; x }}'",
             hash_below, hash_above
         );
         let result = Command::new("git")
@@ -299,12 +316,20 @@ impl Repo {
             .collect())
     }
 
-    /// Run a user-defined submit command for the commit at HEAD~n.
-    /// The command string can contain `{hash}` and `{subject}` placeholders.
+    /// Run a user-defined submit command for a specific commit.
+    /// Temporarily checks out the target commit, runs the command, then
+    /// checks out the original branch. The command template can contain
+    /// `{hash}` and `{subject}` placeholders.
     pub fn run_submit_cmd(&self, cmd_template: &str, hash: &str, subject: &str) -> Result<String> {
         let cmd = cmd_template
             .replace("{hash}", hash)
             .replace("{subject}", subject);
+
+        // Save current branch so we can return after the command
+        let branch = self.get_current_branch()?;
+
+        // Checkout the target commit (detached HEAD)
+        self.git(&["checkout", "--quiet", hash])?;
 
         let result = Command::new("sh")
             .current_dir(&self.workdir)
@@ -313,6 +338,9 @@ impl Repo {
 
         let stdout = String::from_utf8_lossy(&result.stdout).to_string();
         let stderr = String::from_utf8_lossy(&result.stderr).to_string();
+
+        // Always checkout back, even if the command failed
+        let _ = self.git(&["checkout", "--quiet", &branch]);
 
         if !result.status.success() {
             return Err(eyre!("Submit command failed: {}{}", stdout, stderr));
