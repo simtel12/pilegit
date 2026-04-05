@@ -57,7 +57,9 @@ impl App {
     pub fn new(stack: Stack) -> Self {
         let cursor = if stack.is_empty() { 0 } else { stack.len() - 1 };
         let mut history = History::new(500);
-        history.push("initial", &stack);
+        // Record initial state with current HEAD
+        let head = Self::current_head().unwrap_or_default();
+        history.push("initial state", &stack, &head);
         let submit_cmd = std::env::var("PGIT_SUBMIT_CMD").ok();
         Self {
             stack, history,
@@ -145,7 +147,7 @@ impl App {
    p               Publish/submit commit via PGIT_SUBMIT_CMD
    d               View full diff of commit at cursor
 
- HISTORY
+ HISTORY (undo/redo restores actual git state)
    u               Undo last operation
    Ctrl + r        Redo last undone operation
    h               View undo/redo history
@@ -169,13 +171,30 @@ impl App {
         })
     }
 
-    fn record(&mut self, description: &str) {
-        self.history.push(description, &self.stack);
+    /// Get the current git HEAD hash.
+    fn current_head() -> Result<String> {
+        crate::git::ops::Repo::open().and_then(|r| r.get_head_hash())
     }
 
+    /// Record the current state + HEAD hash in the undo timeline.
+    fn record(&mut self, description: &str) {
+        let head = Self::current_head().unwrap_or_default();
+        self.history.push(description, &self.stack, &head);
+    }
+
+    /// Undo: restores git history to the previous state via `git reset --hard`.
     pub fn undo(&mut self) {
-        if let Some(prev) = self.history.undo() {
-            self.stack = prev.clone();
+        if let Some((prev_stack, head_hash)) = self.history.undo() {
+            let stack = prev_stack.clone();
+            let hash = head_hash.to_string();
+            // Reset git to the previous HEAD
+            if let Ok(repo) = crate::git::ops::Repo::open() {
+                if let Err(e) = repo.reset_hard(&hash) {
+                    self.notify(format!("Undo git reset failed: {}", e));
+                    return;
+                }
+            }
+            self.stack = stack;
             self.clamp_cursor();
             self.notify(format!("Undone ({}/{})", self.history.position(), self.history.total()));
         } else {
@@ -183,9 +202,18 @@ impl App {
         }
     }
 
+    /// Redo: advances git history to the next state via `git reset --hard`.
     pub fn redo(&mut self) {
-        if let Some(next) = self.history.redo() {
-            self.stack = next.clone();
+        if let Some((next_stack, head_hash)) = self.history.redo() {
+            let stack = next_stack.clone();
+            let hash = head_hash.to_string();
+            if let Ok(repo) = crate::git::ops::Repo::open() {
+                if let Err(e) = repo.reset_hard(&hash) {
+                    self.notify(format!("Redo git reset failed: {}", e));
+                    return;
+                }
+            }
+            self.stack = stack;
             self.clamp_cursor();
             self.notify(format!("Redone ({}/{})", self.history.position(), self.history.total()));
         } else {
@@ -218,11 +246,11 @@ impl App {
     }
 
     /// Move patch at cursor visually upward by swapping in git history.
-    /// If it creates a conflict, enters conflict resolution flow.
     pub fn move_patch_up(&mut self) {
         if self.stack.is_empty() || self.cursor >= self.stack.len() - 1 {
             return;
         }
+        let name_below = self.short_desc(self.cursor);
         let hash_below = self.short_hash(self.cursor);
         let hash_above = self.short_hash(self.cursor + 1);
         self.notify("Reordering...");
@@ -235,6 +263,7 @@ impl App {
                 }
                 self.cursor += 1;
                 self.clamp_cursor();
+                self.record(&format!("move up: {}", name_below));
                 self.notify("Patch moved up.");
             }
             Ok(false) => {
@@ -250,6 +279,7 @@ impl App {
         if self.cursor == 0 || self.stack.is_empty() {
             return;
         }
+        let name_above = self.short_desc(self.cursor);
         let hash_below = self.short_hash(self.cursor - 1);
         let hash_above = self.short_hash(self.cursor);
         self.notify("Reordering...");
@@ -262,6 +292,7 @@ impl App {
                 }
                 self.cursor -= 1;
                 self.clamp_cursor();
+                self.record(&format!("move down: {}", name_above));
                 self.notify("Patch moved down.");
             }
             Ok(false) => {
@@ -276,9 +307,12 @@ impl App {
         if let Some((lo, hi)) = self.selection_range() {
             let indices: Vec<usize> = (lo..=hi).collect();
             let count = indices.len();
+            let subjects: Vec<String> = indices.iter()
+                .map(|&i| self.stack.patches[i].subject.clone())
+                .collect();
             match self.stack.squash(&indices) {
                 Ok(()) => {
-                    self.record("squash commits");
+                    self.record(&format!("squash {} commits: {}", count, subjects.join(", ")));
                     self.select_anchor = None;
                     self.mode = Mode::Normal;
                     self.cursor = lo;
@@ -307,6 +341,7 @@ impl App {
                     return;
                 }
                 self.clamp_cursor();
+                self.record(&format!("remove: {}", subject));
                 self.notify(format!("Removed: {}", subject));
             }
             Ok(false) => {
@@ -315,12 +350,6 @@ impl App {
             }
             Err(e) => self.notify(format!("Remove failed: {}", e)),
         }
-    }
-
-    /// Get the short hash (7 chars) for the commit at a given index.
-    fn short_hash(&self, index: usize) -> String {
-        let h = &self.stack.patches[index].hash;
-        h[..7.min(h.len())].to_string()
     }
 
     /// Show the insert location prompt.
@@ -337,28 +366,32 @@ impl App {
     pub fn insert_after_cursor(&mut self) {
         self.mode = Mode::Normal;
         if self.stack.is_empty() || self.cursor == self.stack.len() - 1 {
+            // Cursor at the top = same as inserting at HEAD
             self.insert_at_head();
             return;
         }
-        let h = &self.stack.patches[self.cursor].hash;
-        let hash = h[..7.min(h.len())].to_string();
+        let hash = self.short_hash(self.cursor);
         self.wants_suspend = Some(SuspendReason::InsertAfterCursor { hash });
     }
 
     pub fn edit_commit_at_cursor(&mut self) {
         if self.stack.is_empty() { return; }
-        let h = &self.stack.patches[self.cursor].hash;
-        let hash = h[..7.min(h.len())].to_string();
+        let hash = self.short_hash(self.cursor);
         self.wants_suspend = Some(SuspendReason::EditCommit { hash });
     }
 
+    /// Reload the stack from git and record in history.
     pub fn reload_stack(&mut self) -> Result<()> {
         let repo = crate::git::ops::Repo::open()?;
         let commits = repo.list_stack_commits()?;
         self.stack = Stack::new(self.stack.base.clone(), commits);
-        self.record("reload");
         self.clamp_cursor();
         Ok(())
+    }
+
+    /// Record a reload in history with a description.
+    pub fn record_reload(&mut self, description: &str) {
+        self.record(description);
     }
 
     pub fn start_rebase(&mut self) {
@@ -373,6 +406,7 @@ impl App {
         match repo.rebase_onto_base()? {
             true => {
                 self.reload_stack()?;
+                self.record("rebase onto base");
                 self.notify("Rebase completed successfully.");
                 Ok(true)
             }
@@ -390,6 +424,7 @@ impl App {
         match repo.rebase_continue()? {
             true => {
                 self.reload_stack()?;
+                self.record("rebase completed");
                 self.notify("Rebase completed successfully.");
                 Ok(true)
             }
@@ -406,6 +441,7 @@ impl App {
         let repo = crate::git::ops::Repo::open()?;
         repo.rebase_abort()?;
         self.reload_stack()?;
+        self.record("rebase aborted");
         self.notify("Rebase aborted.");
         Ok(())
     }
@@ -421,6 +457,7 @@ impl App {
         if self.stack.is_empty() { return; }
         let hash = self.stack.patches[self.cursor].hash.clone();
         let subject = self.stack.patches[self.cursor].subject.clone();
+        self.notify(format!("Submitting {} ...", &hash[..7.min(hash.len())]));
         match crate::git::ops::Repo::open().and_then(|r| r.run_submit_cmd(&cmd, &hash, &subject)) {
             Ok(out) => self.notify(format!("Submitted: {}", out.trim())),
             Err(e) => self.notify(format!("Submit failed: {}", e)),
@@ -429,5 +466,23 @@ impl App {
 
     pub fn show_help(&mut self) {
         self.mode = Mode::Help;
+    }
+
+    /// Get the short hash (7 chars) for the commit at a given index.
+    fn short_hash(&self, index: usize) -> String {
+        let h = &self.stack.patches[index].hash;
+        h[..7.min(h.len())].to_string()
+    }
+
+    /// Get a short description (hash + truncated subject) for history messages.
+    fn short_desc(&self, index: usize) -> String {
+        let p = &self.stack.patches[index];
+        let h = &p.hash[..7.min(p.hash.len())];
+        let s = if p.subject.len() > 30 {
+            format!("{}...", &p.subject[..27])
+        } else {
+            p.subject.clone()
+        };
+        format!("{} {}", h, s)
     }
 }
