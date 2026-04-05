@@ -207,3 +207,87 @@ fn parse_version(version_str: &str) -> Option<(u32, u32)> {
     let minor = parts.next()?.parse::<u32>().ok()?;
     Some((major, minor))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn parse_git_version() {
+        assert_eq!(parse_version("git version 2.43.0"), Some((2, 43)));
+        assert_eq!(parse_version("git version 2.26.0"), Some((2, 26)));
+    }
+
+    #[test]
+    fn parse_gh_version() {
+        assert_eq!(parse_version("gh version 2.62.0 (2024-11-14)"), Some((2, 62)));
+    }
+
+    #[test]
+    fn parse_glab_version() {
+        assert_eq!(parse_version("glab version 1.46.1 (2024-10-01)"), Some((1, 46)));
+    }
+
+    #[test]
+    fn parse_bare_version() {
+        assert_eq!(parse_version("0.9.2"), Some((0, 9)));
+    }
+
+    #[test]
+    fn parse_garbage_returns_none() {
+        assert_eq!(parse_version("no version here"), None);
+        assert_eq!(parse_version(""), None);
+    }
+
+    #[test]
+    fn config_round_trip() {
+        let dir = PathBuf::from(std::env::temp_dir()).join("pgit-test-config");
+        let _ = std::fs::create_dir_all(&dir);
+
+        let config = Config {
+            forge: ForgeConfig {
+                forge_type: "gitlab".to_string(),
+                submit_cmd: None,
+            },
+            repo: RepoConfig {
+                base: Some("origin/develop".to_string()),
+            },
+        };
+
+        config.save(&dir).unwrap();
+        let loaded = Config::load(&dir).expect("should load");
+        assert_eq!(loaded.forge.forge_type, "gitlab");
+        assert_eq!(loaded.repo.base, Some("origin/develop".to_string()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn config_round_trip_custom() {
+        let dir = PathBuf::from(std::env::temp_dir()).join("pgit-test-config-custom");
+        let _ = std::fs::create_dir_all(&dir);
+
+        let config = Config {
+            forge: ForgeConfig {
+                forge_type: "custom".to_string(),
+                submit_cmd: Some("arc diff HEAD^".to_string()),
+            },
+            repo: RepoConfig { base: None },
+        };
+
+        config.save(&dir).unwrap();
+        let loaded = Config::load(&dir).expect("should load");
+        assert_eq!(loaded.forge.forge_type, "custom");
+        assert_eq!(loaded.forge.submit_cmd, Some("arc diff HEAD^".to_string()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn config_missing_file_returns_none() {
+        let dir = PathBuf::from(std::env::temp_dir()).join("pgit-test-config-missing");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(Config::load(&dir).is_none());
+    }
+}

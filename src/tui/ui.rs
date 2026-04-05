@@ -436,3 +436,41 @@ fn render_overlay(frame: &mut Frame, text: &str, color: Color, parent_area: Rect
         dialog_area,
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shortcuts_single_line_wide() {
+        let shortcuts = "a:one  b:two  c:three";
+        let lines = build_shortcut_lines(shortcuts, 200);
+        assert_eq!(lines.len(), 1);
+    }
+
+    #[test]
+    fn shortcuts_wrap_narrow() {
+        let shortcuts = "↑k/↓j:move  V:select  Ctrl+↑↓:reorder  e:edit  i:insert  x:remove  d:diff  r:rebase  p:submit  s:sync  ?:help  q:quit";
+        let lines = build_shortcut_lines(shortcuts, 60);
+        assert!(lines.len() >= 2, "expected wrapping at width 60, got {} lines", lines.len());
+    }
+
+    #[test]
+    fn shortcuts_very_narrow() {
+        let shortcuts = "a:one  b:two  c:three  d:four  e:five";
+        let lines = build_shortcut_lines(shortcuts, 20);
+        assert!(lines.len() >= 3, "expected 3+ lines at width 20, got {}", lines.len());
+    }
+
+    #[test]
+    fn shortcuts_empty() {
+        let lines = build_shortcut_lines("", 80);
+        assert_eq!(lines.len(), 1); // at least one empty line
+    }
+
+    #[test]
+    fn shortcuts_single_item_fits() {
+        let lines = build_shortcut_lines("q:quit", 80);
+        assert_eq!(lines.len(), 1);
+    }
+}

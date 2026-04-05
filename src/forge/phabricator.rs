@@ -177,3 +177,36 @@ fn parse_revision_id(message: &str) -> Option<u32> {
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_revision_url() {
+        let msg = "Some commit\n\nDifferential Revision: https://phab.example.com/D1234";
+        assert_eq!(parse_revision_id(msg), Some(1234));
+    }
+
+    #[test]
+    fn parse_revision_bare() {
+        assert_eq!(parse_revision_id("Differential Revision: D5678"), Some(5678));
+    }
+
+    #[test]
+    fn parse_revision_multiline() {
+        let msg = "fix bug\n\nDifferential Revision: https://phab.co/D42\nSome other line";
+        assert_eq!(parse_revision_id(msg), Some(42));
+    }
+
+    #[test]
+    fn parse_revision_not_present() {
+        assert_eq!(parse_revision_id("just a commit message"), None);
+        assert_eq!(parse_revision_id(""), None);
+    }
+
+    #[test]
+    fn parse_revision_wrong_prefix() {
+        assert_eq!(parse_revision_id("Reviewed-by: D9999"), None);
+    }
+}
