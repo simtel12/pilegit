@@ -1,10 +1,7 @@
 use clap::{Parser, Subcommand};
 use color_eyre::Result;
 
-mod core;
-mod forge;
-mod git;
-mod tui;
+use pilegit::{core, git, tui};
 
 #[derive(Parser)]
 #[command(

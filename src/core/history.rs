@@ -99,3 +99,103 @@ impl History {
     }
 
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::stack::{PatchEntry, PatchStatus, Stack};
+
+    fn dummy_stack(n: usize) -> Stack {
+        let patches: Vec<PatchEntry> = (0..n).map(|i| PatchEntry {
+            hash: format!("abc{}", i),
+            subject: format!("commit {}", i),
+            body: String::new(),
+            author: "test".into(),
+            timestamp: "2026-01-01".into(),
+            pr_branch: None,
+            pr_number: None,
+            pr_url: None,
+            status: PatchStatus::Clean,
+        }).collect();
+        Stack::new("main".into(), patches)
+    }
+
+    #[test]
+    fn push_and_undo() {
+        let mut h = History::new(100);
+        h.push("initial", &dummy_stack(1), "aaa");
+        h.push("second", &dummy_stack(2), "bbb");
+        h.push("third", &dummy_stack(3), "ccc");
+
+        assert_eq!(h.total(), 3);
+        assert_eq!(h.position(), 2);
+
+        let (stack, hash) = h.undo().unwrap();
+        assert_eq!(stack.len(), 2);
+        assert_eq!(hash, "bbb");
+
+        let (stack, hash) = h.undo().unwrap();
+        assert_eq!(stack.len(), 1);
+        assert_eq!(hash, "aaa");
+
+        // Can't undo past the beginning
+        assert!(h.undo().is_none());
+    }
+
+    #[test]
+    fn redo_after_undo() {
+        let mut h = History::new(100);
+        h.push("a", &dummy_stack(1), "h1");
+        h.push("b", &dummy_stack(2), "h2");
+        h.push("c", &dummy_stack(3), "h3");
+
+        h.undo(); // → b
+        h.undo(); // → a
+
+        let (stack, hash) = h.redo().unwrap();
+        assert_eq!(stack.len(), 2);
+        assert_eq!(hash, "h2");
+
+        let (stack, _) = h.redo().unwrap();
+        assert_eq!(stack.len(), 3);
+
+        // Can't redo past the end
+        assert!(h.redo().is_none());
+    }
+
+    #[test]
+    fn push_after_undo_clears_redo() {
+        let mut h = History::new(100);
+        h.push("a", &dummy_stack(1), "h1");
+        h.push("b", &dummy_stack(2), "h2");
+        h.push("c", &dummy_stack(3), "h3");
+
+        h.undo(); // → b
+        h.push("d", &dummy_stack(4), "h4"); // replaces c
+
+        assert_eq!(h.total(), 3); // a, b, d
+        assert!(h.redo().is_none()); // c is gone
+    }
+
+    #[test]
+    fn max_entries_eviction() {
+        let mut h = History::new(3);
+        h.push("a", &dummy_stack(1), "h1");
+        h.push("b", &dummy_stack(2), "h2");
+        h.push("c", &dummy_stack(3), "h3");
+        h.push("d", &dummy_stack(4), "h4"); // evicts a
+
+        assert_eq!(h.total(), 3); // b, c, d
+        let descriptions: Vec<&str> = h.list().iter().map(|e| e.description.as_str()).collect();
+        assert_eq!(descriptions, vec!["b", "c", "d"]);
+    }
+
+    #[test]
+    fn empty_history() {
+        let mut h = History::new(10);
+        assert!(h.undo().is_none());
+        assert!(h.redo().is_none());
+        assert!(!h.can_undo());
+        assert_eq!(h.total(), 0);
+    }
+}
