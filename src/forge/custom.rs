@@ -20,7 +20,6 @@ impl Custom {
 
 impl Forge for Custom {
     fn name(&self) -> &str { "Custom" }
-    fn uses_branches(&self) -> bool { false }
     fn needs_description_editor(&self) -> bool { false }
 
     fn submit(
