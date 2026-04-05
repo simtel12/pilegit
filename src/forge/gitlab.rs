@@ -25,8 +25,10 @@ impl Forge for GitLab {
         let create = Command::new("glab")
             .current_dir(&repo.workdir)
             .args(["mr", "create",
-                "--head", &branch_name, "--base", base,
-                "--title", subject, "--description", body,
+                "--source-branch", &branch_name,
+                "--target-branch", base,
+                "--title", subject,
+                "--description", body,
                 "--yes"])
             .output()?;
 
@@ -60,35 +62,24 @@ impl Forge for GitLab {
     }
 
     fn list_open(&self, repo: &Repo) -> (HashMap<String, u32>, bool) {
-        let mut map = HashMap::new();
-        let output = Command::new("glab")
-            .current_dir(&repo.workdir)
-            .args(["mr", "list", "--mine", "--json", "iid,sourceBranch"])
-            .output();
-        match output {
-            Ok(out) if out.status.success() => {
-                let json = String::from_utf8_lossy(&out.stdout);
-                if let Ok(mrs) = serde_json::from_str::<Vec<serde_json::Value>>(&json) {
-                    for mr in mrs {
-                        if let (Some(num), Some(head)) = (
-                            mr["iid"].as_u64(), mr["sourceBranch"].as_str(),
-                        ) {
-                            if head.starts_with("pgit/") {
-                                map.insert(head.to_string(), num as u32);
-                            }
-                        }
-                    }
-                }
-                (map, true)
-            }
-            _ => (map, false),
-        }
+        let (full, available) = self.list_open_full(repo);
+        let map = full.into_iter()
+            .map(|(k, (num, _url))| (k, num))
+            .collect();
+        (map, available)
     }
 
     fn edit_base(&self, repo: &Repo, branch: &str, base: &str) -> bool {
+        // glab mr update requires the MR IID, not branch name
+        let iid = self.get_mr_iid(repo, branch);
+        let target = match &iid {
+            Some(n) => n.as_str(),
+            None => branch, // fallback: glab tries current branch's MR
+        };
+
         Command::new("glab")
             .current_dir(&repo.workdir)
-            .args(["mr", "update", branch, "--target-branch", base])
+            .args(["mr", "update", target, "--target-branch", base])
             .stderr(std::process::Stdio::null())
             .output()
             .map(|o| o.status.success())
@@ -96,14 +87,15 @@ impl Forge for GitLab {
     }
 
     fn mark_submitted(&self, repo: &Repo, patches: &mut [PatchEntry]) {
-        let (mr_map, available) = self.list_open(repo);
+        let (mr_map, available) = self.list_open_full(repo);
         for patch in patches.iter_mut() {
             let branch = repo.make_pgit_branch_name(&patch.subject);
             if available {
-                if let Some(&mr_num) = mr_map.get(&branch) {
+                if let Some((mr_num, mr_url)) = mr_map.get(&branch) {
                     patch.status = PatchStatus::Submitted;
                     patch.pr_branch = Some(branch);
-                    patch.pr_number = Some(mr_num);
+                    patch.pr_number = Some(*mr_num);
+                    patch.pr_url = Some(mr_url.clone());
                 }
             } else if repo.git_pub(&["rev-parse", "--verify", &branch]).is_ok() {
                 patch.status = PatchStatus::Submitted;
@@ -143,5 +135,57 @@ impl Forge for GitLab {
         }
 
         Ok(updates)
+    }
+}
+
+impl GitLab {
+    /// Fetch open MRs with full data (IID + URL).
+    fn list_open_full(&self, repo: &Repo) -> (HashMap<String, (u32, String)>, bool) {
+        let mut map = HashMap::new();
+        let output = Command::new("glab")
+            .current_dir(&repo.workdir)
+            .args(["mr", "list", "--mine",
+                "--json", "iid,source_branch,web_url"])
+            .output();
+        match output {
+            Ok(out) if out.status.success() => {
+                let json = String::from_utf8_lossy(&out.stdout);
+                if let Ok(mrs) = serde_json::from_str::<Vec<serde_json::Value>>(&json) {
+                    for mr in mrs {
+                        // glab may use snake_case or camelCase depending on version
+                        let num = mr["iid"].as_u64();
+                        let head = mr["source_branch"].as_str()
+                            .or_else(|| mr["sourceBranch"].as_str());
+                        let url = mr["web_url"].as_str()
+                            .or_else(|| mr["webUrl"].as_str())
+                            .unwrap_or("").to_string();
+
+                        if let (Some(num), Some(head)) = (num, head) {
+                            if head.starts_with("pgit/") {
+                                map.insert(head.to_string(), (num as u32, url));
+                            }
+                        }
+                    }
+                }
+                (map, true)
+            }
+            _ => (map, false),
+        }
+    }
+
+    /// Look up the MR IID for a source branch.
+    fn get_mr_iid(&self, repo: &Repo, branch: &str) -> Option<String> {
+        let output = Command::new("glab")
+            .current_dir(&repo.workdir)
+            .args(["mr", "view", branch, "--json", "iid"])
+            .stderr(std::process::Stdio::null())
+            .output().ok()?;
+        if output.status.success() {
+            let json = String::from_utf8_lossy(&output.stdout);
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json) {
+                return v["iid"].as_u64().map(|n| n.to_string());
+            }
+        }
+        None
     }
 }

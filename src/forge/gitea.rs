@@ -22,6 +22,7 @@ impl Forge for Gitea {
         repo.git_pub(&["branch", "-f", &branch_name, hash])?;
         repo.git_pub(&["push", "-f", "origin", &branch_name])?;
 
+        // tea supports both `pr create` and `pulls create` (alias)
         let create = Command::new("tea")
             .current_dir(&repo.workdir)
             .args(["pr", "create",
@@ -41,7 +42,7 @@ impl Forge for Gitea {
     }
 
     fn update(
-        &self, repo: &Repo, hash: &str, subject: &str, base: &str,
+        &self, repo: &Repo, hash: &str, subject: &str, _base: &str,
     ) -> Result<String> {
         let _ = repo.fetch_origin();
         let branch_name = repo.make_pgit_branch_name(subject);
@@ -49,24 +50,62 @@ impl Forge for Gitea {
         repo.git_pub(&["branch", "-f", &branch_name, hash])?;
         repo.git_pub(&["push", "-f", "origin", &branch_name])?;
 
-        self.edit_base(repo, &branch_name, base);
-        Ok(format!("PR updated: {} → {}", branch_name, base))
+        Ok(format!("PR pushed: {} (update base manually on Gitea if needed)", branch_name))
     }
 
-    fn list_open(&self, _repo: &Repo) -> (HashMap<String, u32>, bool) {
-        // tea doesn't have great JSON output — fall back to local branch check
-        (HashMap::new(), false)
+    fn list_open(&self, repo: &Repo) -> (HashMap<String, u32>, bool) {
+        let mut map = HashMap::new();
+        // tea pulls list with JSON output
+        let output = Command::new("tea")
+            .current_dir(&repo.workdir)
+            .args(["pr", "list", "--output", "json",
+                "--fields", "index,head,state"])
+            .output();
+        match output {
+            Ok(out) if out.status.success() => {
+                let json = String::from_utf8_lossy(&out.stdout);
+                if let Ok(prs) = serde_json::from_str::<Vec<serde_json::Value>>(&json) {
+                    for pr in prs {
+                        let state = pr["state"].as_str().unwrap_or("");
+                        if state != "open" { continue; }
+
+                        let num = pr["index"].as_u64()
+                            .or_else(|| pr["number"].as_u64());
+                        // head can be a string or an object with a "name" field
+                        let head = pr["head"].as_str()
+                            .or_else(|| pr["head"]["name"].as_str())
+                            .or_else(|| pr["head"]["ref"].as_str());
+
+                        if let (Some(num), Some(head)) = (num, head) {
+                            if head.starts_with("pgit/") {
+                                map.insert(head.to_string(), num as u32);
+                            }
+                        }
+                    }
+                }
+                (map, true)
+            }
+            _ => (map, false),
+        }
     }
 
     fn edit_base(&self, _repo: &Repo, _branch: &str, _base: &str) -> bool {
-        // tea CLI doesn't support editing PR base easily
+        // tea CLI doesn't support editing PR base directly.
+        // Gitea users should update base via the web UI.
         false
     }
 
     fn mark_submitted(&self, repo: &Repo, patches: &mut [PatchEntry]) {
+        let (pr_map, available) = self.list_open(repo);
         for patch in patches.iter_mut() {
             let branch = repo.make_pgit_branch_name(&patch.subject);
-            if repo.git_pub(&["rev-parse", "--verify", &branch]).is_ok() {
+            if available {
+                if let Some(&pr_num) = pr_map.get(&branch) {
+                    patch.status = PatchStatus::Submitted;
+                    patch.pr_branch = Some(branch);
+                    patch.pr_number = Some(pr_num);
+                }
+            } else if repo.git_pub(&["rev-parse", "--verify", &branch]).is_ok() {
                 patch.status = PatchStatus::Submitted;
                 patch.pr_branch = Some(branch);
             }
@@ -80,15 +119,17 @@ impl Forge for Gitea {
         on_progress("Fetching latest from origin...");
         let _ = repo.fetch_origin();
 
+        let (open_prs, _) = self.list_open(repo);
         let mut updates = Vec::new();
+
         for patch in patches {
             let branch = repo.make_pgit_branch_name(&patch.subject);
-            if repo.git_pub(&["rev-parse", "--verify", &branch]).is_ok() {
-                on_progress(&format!("Pushing: {} ...", &patch.subject));
-                let _ = repo.git_pub(&["branch", "-f", &branch, &patch.hash]);
-                let _ = repo.git_pub(&["push", "-f", "origin", &branch]);
-                updates.push(format!("✓ {} pushed", branch));
-            }
+            if !open_prs.contains_key(&branch) { continue; }
+
+            on_progress(&format!("Pushing: {} ...", &patch.subject));
+            let _ = repo.git_pub(&["branch", "-f", &branch, &patch.hash]);
+            let _ = repo.git_pub(&["push", "-f", "origin", &branch]);
+            updates.push(format!("✓ {} pushed (update base on Gitea web if needed)", branch));
         }
         Ok(updates)
     }

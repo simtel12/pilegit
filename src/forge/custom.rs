@@ -21,6 +21,7 @@ impl Custom {
 impl Forge for Custom {
     fn name(&self) -> &str { "Custom" }
     fn uses_branches(&self) -> bool { false }
+    fn needs_description_editor(&self) -> bool { false }
 
     fn submit(
         &self, repo: &Repo, hash: &str, subject: &str,
@@ -43,18 +44,15 @@ impl Forge for Custom {
         let result = Command::new("sh")
             .current_dir(&repo.workdir)
             .args(["-c", &cmd])
-            .output()?;
-
-        let stdout = String::from_utf8_lossy(&result.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&result.stderr).to_string();
+            .status()?;
 
         let _ = repo.git_pub(&["checkout", "--quiet", &branch]);
         let _ = std::fs::remove_file(&msg_file);
 
-        if result.status.success() {
-            Ok(format!("{}{}", stdout.trim(), stderr.trim()))
+        if result.success() {
+            Ok("Custom command completed successfully.".to_string())
         } else {
-            Ok(format!("Command exited with error: {}{}", stdout.trim(), stderr.trim()))
+            Ok("Custom command exited with error.".to_string())
         }
     }
 
