@@ -14,6 +14,8 @@ cargo install --path .
 
 This installs the `pgit` binary.
 
+Testing edit
+
 ## Quick Start
 
 ```bash
