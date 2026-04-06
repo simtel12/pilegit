@@ -3,6 +3,7 @@
 **Git stacking with style** — manage, squash, reorder, and submit stacked PRs from an interactive TUI.
 
 [![Stars](https://img.shields.io/github/stars/hokwangchoi/pilegit?style=for-the-badge&logo=github&color=f9e2af&logoColor=cdd6f4&labelColor=1e1e2e)](https://github.com/hokwangchoi/pilegit/stargazers)
+[![Crates.io](https://img.shields.io/crates/v/pilegit?style=for-the-badge&logo=rust&color=fab387&logoColor=cdd6f4&labelColor=1e1e2e)](https://crates.io/crates/pilegit)
 [![Forks](https://img.shields.io/github/forks/hokwangchoi/pilegit?style=for-the-badge&logo=git&color=89b4fa&logoColor=cdd6f4&labelColor=1e1e2e)](https://github.com/hokwangchoi/pilegit/network/members)
 [![License: MIT](https://img.shields.io/badge/license-MIT-a6e3a1?style=for-the-badge&logoColor=cdd6f4&labelColor=1e1e2e)](LICENSE)
 
@@ -18,8 +19,18 @@ Develop on a single branch, organize commits into reviewable chunks, submit each
 ## Install
 
 ```bash
+cargo install pilegit
+```
+
+Or build from source:
+
+```bash
+git clone https://github.com/hokwangchoi/pilegit.git
+cd pilegit
 cargo install --path .
 ```
+
+This installs the `pgit` binary.
 
 ## Quick Start
 
