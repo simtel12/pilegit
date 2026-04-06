@@ -61,7 +61,7 @@ pgit status   # show stack non-interactively
 | `q` | Quit |
 
 **Select mode:** `V` to start → `j`/`k` extend → `s` squash → `Esc` cancel  
-**Diff view:** `j`/`k` scroll · `Ctrl+d`/`Ctrl+u` half-page · `q` back
+**Diff view:** `j`/`k` scroll · `Ctrl+↑↓` half-page · `q` back
 
 ## Setup
 

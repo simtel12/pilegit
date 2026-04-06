@@ -166,11 +166,11 @@ pub fn handle_select(app: &mut App, key: KeyEvent) {
 pub fn handle_diff_view(app: &mut App, key: KeyEvent) {
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         match key.code {
-            KeyCode::Char('d') => {
+            KeyCode::Down | KeyCode::Char('j') => {
                 app.diff_scroll = app.diff_scroll.saturating_add(20)
                     .min(app.diff_content.len().saturating_sub(1));
             }
-            KeyCode::Char('u') => { app.diff_scroll = app.diff_scroll.saturating_sub(20); }
+            KeyCode::Up | KeyCode::Char('k') => { app.diff_scroll = app.diff_scroll.saturating_sub(20); }
             _ => {}
         }
         return;
