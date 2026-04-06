@@ -182,11 +182,13 @@ impl Forge for Phabricator {
                 continue;
             }
 
-            // Non-interactive: skip editor, provide message, close stdin
+            // Non-interactive: --message provides update comment (no editor),
+            // stdin null prevents any remaining prompts.
+            // Note: --verbatim and --update are mutually exclusive in arc.
             let status = Command::new("arc")
                 .current_dir(&repo.workdir)
                 .args(["diff", "HEAD^", "--update", &format!("D{}", id),
-                    "--verbatim", "--message", &patch.subject])
+                    "--message", "Updated diff"])
                 .stdin(std::process::Stdio::null())
                 .status();
 
