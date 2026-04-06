@@ -31,7 +31,7 @@ impl Forge for Phabricator {
         let status = Command::new("arc")
             .current_dir(&repo.workdir)
             .args(["diff", "HEAD^"])
-            .status()?;
+            .status();
 
         // After arc finishes, check if it added a Differential Revision trailer
         let msg = repo.git_pub(&["log", "-1", "--format=%B"])
@@ -40,13 +40,15 @@ impl Forge for Phabricator {
 
         let _ = repo.git_pub(&["checkout", "--quiet", &branch]);
 
-        if status.success() {
-            match revision_id {
-                Some(id) => Ok(format!("Revision created: D{}", id)),
-                None => Ok("Revision created (could not parse ID — add Differential Revision: trailer to commit)".to_string()),
+        match status {
+            Ok(s) if s.success() => {
+                match revision_id {
+                    Some(id) => Ok(format!("Revision created: D{}", id)),
+                    None => Ok("Revision created (could not parse ID — add Differential Revision: trailer to commit)".to_string()),
+                }
             }
-        } else {
-            Err(eyre!("arc diff failed"))
+            Ok(_) => Err(eyre!("arc diff failed")),
+            Err(e) => Err(eyre!("arc not found: {}", e)),
         }
     }
 
@@ -64,30 +66,30 @@ impl Forge for Phabricator {
 
         let status = match &revision_id {
             Some(id) => {
-                // Update existing revision
                 Command::new("arc")
                     .current_dir(&repo.workdir)
                     .args(["diff", "HEAD^", "--update", &format!("D{}", id)])
-                    .status()?
+                    .status()
             }
             None => {
-                // No revision ID — let arc try to figure it out
                 Command::new("arc")
                     .current_dir(&repo.workdir)
                     .args(["diff", "HEAD^"])
-                    .status()?
+                    .status()
             }
         };
 
         let _ = repo.git_pub(&["checkout", "--quiet", &branch]);
 
-        if status.success() {
-            match revision_id {
-                Some(id) => Ok(format!("Revision updated: D{}", id)),
-                None => Ok("Revision updated".to_string()),
+        match status {
+            Ok(s) if s.success() => {
+                match revision_id {
+                    Some(id) => Ok(format!("Revision updated: D{}", id)),
+                    None => Ok("Revision updated".to_string()),
+                }
             }
-        } else {
-            Err(eyre!("arc diff failed"))
+            Ok(_) => Err(eyre!("arc diff failed")),
+            Err(e) => Err(eyre!("arc not found: {}", e)),
         }
     }
 
@@ -134,12 +136,18 @@ impl Forge for Phabricator {
 
             on_progress(&format!("Updating D{}: {} ...", id, &patch.subject));
 
-            repo.git_pub(&["checkout", "--quiet", &patch.hash])?;
+            if repo.git_pub(&["checkout", "--quiet", &patch.hash]).is_err() {
+                updates.push(format!("⚠ D{} checkout failed, skipping", id));
+                continue;
+            }
+
+            // Use --verbatim to skip message editing, and pipe stdin from
+            // /dev/null to prevent arc from waiting for interactive input.
             let status = Command::new("arc")
                 .current_dir(&repo.workdir)
-                .args(["diff", "HEAD^", "--update", &format!("D{}", id)])
-                .stderr(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
+                .args(["diff", "HEAD^", "--update", &format!("D{}", id),
+                    "--verbatim", "--message", &patch.subject])
+                .stdin(std::process::Stdio::null())
                 .status();
 
             match status {

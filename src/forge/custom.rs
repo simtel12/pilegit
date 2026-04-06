@@ -33,8 +33,8 @@ impl Forge for Custom {
 
         let cmd = self.cmd_template
             .replace("{hash}", hash)
-            .replace("{subject}", subject)
-            .replace("{message}", body)
+            .replace("{subject}", &shell_escape(subject))
+            .replace("{message}", &shell_escape(body))
             .replace("{message_file}", &msg_file.display().to_string());
 
         let branch = repo.get_current_branch()?;
@@ -43,15 +43,15 @@ impl Forge for Custom {
         let result = Command::new("sh")
             .current_dir(&repo.workdir)
             .args(["-c", &cmd])
-            .status()?;
+            .status();
 
         let _ = repo.git_pub(&["checkout", "--quiet", &branch]);
         let _ = std::fs::remove_file(&msg_file);
 
-        if result.success() {
-            Ok("Custom command completed successfully.".to_string())
-        } else {
-            Ok("Custom command exited with error.".to_string())
+        match result {
+            Ok(s) if s.success() => Ok("Custom command completed successfully.".to_string()),
+            Ok(_) => Ok("Custom command exited with error.".to_string()),
+            Err(e) => Err(color_eyre::eyre::eyre!("Failed to run command: {}", e)),
         }
     }
 
@@ -76,4 +76,10 @@ impl Forge for Custom {
         on_progress("Custom commands don't support sync — re-submit individually with 'p'.");
         Ok(Vec::new())
     }
+}
+
+/// Escape a string for safe use in sh -c by wrapping in single quotes.
+/// Any single quotes in the input are replaced with '\'' (end quote, escaped quote, start quote).
+fn shell_escape(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }

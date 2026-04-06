@@ -89,6 +89,18 @@ impl Repo {
         self.git(&["show", "--format=", hash])
     }
 
+    /// Check if there are uncommitted changes (staged or unstaged).
+    pub fn has_uncommitted_changes(&self) -> bool {
+        let output = Command::new("git")
+            .current_dir(&self.workdir)
+            .args(["status", "--porcelain"])
+            .output();
+        match output {
+            Ok(out) => !out.stdout.is_empty(),
+            Err(_) => false,
+        }
+    }
+
     /// Fetch from origin to ensure we have the latest remote state.
     pub fn fetch_origin(&self) -> Result<()> {
         self.git(&["fetch", "origin"])?;

@@ -25,6 +25,14 @@ pub type Tui = Terminal<CrosstermBackend<io::Stdout>>;
 /// Launch the interactive TUI with suspend/resume support.
 pub fn run() -> Result<()> {
     let repo = Repo::open()?;
+
+    // Block startup if a rebase is in progress from a previous session
+    if repo.is_rebase_in_progress() {
+        eprintln!("  \x1b[31m⚠ A rebase is already in progress.\x1b[0m");
+        eprintln!("  Run \x1b[1mgit rebase --continue\x1b[0m or \x1b[1mgit rebase --abort\x1b[0m first.");
+        return Ok(());
+    }
+
     let base = repo.detect_base()?;
     let mut commits = repo.list_stack_commits()?;
 
@@ -48,6 +56,14 @@ pub fn run() -> Result<()> {
     let stack = Stack::new(base, commits);
     let mut app = App::new(stack, f);
 
+    // Restore terminal on panic — set once, not per loop iteration
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic| {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        original_hook(panic);
+    }));
+
     loop {
         // Initialize terminal
         enable_raw_mode()?;
@@ -55,14 +71,6 @@ pub fn run() -> Result<()> {
         execute!(stdout, EnterAlternateScreen)?;
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
-
-        // Restore terminal on panic
-        let original_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |panic| {
-            let _ = disable_raw_mode();
-            let _ = execute!(io::stdout(), LeaveAlternateScreen);
-            original_hook(panic);
-        }));
 
         // Run the TUI until quit or suspend
         app.run(&mut terminal)?;

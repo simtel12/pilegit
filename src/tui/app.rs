@@ -206,6 +206,13 @@ impl App {
 
     /// Undo: restores git history to the previous state via `git reset --hard`.
     pub fn undo(&mut self) {
+        // Check for uncommitted changes before reset --hard
+        if let Ok(repo) = crate::git::ops::Repo::open() {
+            if repo.has_uncommitted_changes() {
+                self.notify("Undo blocked: you have uncommitted changes. Commit or stash first.");
+                return;
+            }
+        }
         if let Some((prev_stack, head_hash)) = self.history.undo() {
             let stack = prev_stack.clone();
             let hash = head_hash.to_string();
@@ -226,6 +233,13 @@ impl App {
 
     /// Redo: advances git history to the next state via `git reset --hard`.
     pub fn redo(&mut self) {
+        // Check for uncommitted changes before reset --hard
+        if let Ok(repo) = crate::git::ops::Repo::open() {
+            if repo.has_uncommitted_changes() {
+                self.notify("Redo blocked: you have uncommitted changes. Commit or stash first.");
+                return;
+            }
+        }
         if let Some((next_stack, head_hash)) = self.history.redo() {
             let stack = next_stack.clone();
             let hash = head_hash.to_string();
