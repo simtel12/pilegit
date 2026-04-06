@@ -9,10 +9,9 @@ use crate::git::ops::Repo;
 
 /// Phabricator integration via `arc` CLI.
 ///
-/// Workflow:
-/// - Submit: `arc diff HEAD^` — creates a Differential revision
-/// - Update: `arc diff HEAD^ --update DXXX` — updates an existing revision
-/// - Detection: parses `Differential Revision:` trailer from commit messages
+/// Key insight: `arc diff` amends the commit to add a `Differential Revision:`
+/// trailer. To keep this trailer in the branch history, submit/update use
+/// interactive rebase (`edit` marker) so the amendment happens in-place.
 pub struct Phabricator;
 
 impl Forge for Phabricator {
@@ -23,47 +22,75 @@ impl Forge for Phabricator {
         &self, repo: &Repo, hash: &str, _subject: &str,
         _base: &str, _body: &str,
     ) -> Result<String> {
-        let branch = repo.get_current_branch()?;
+        let short = &hash[..7.min(hash.len())];
 
-        repo.git_pub(&["checkout", "--quiet", hash])?;
+        // Pause rebase at the target commit
+        match repo.rebase_edit_commit(short) {
+            Ok(false) => {} // paused — good
+            Ok(true) => return Err(eyre!("Commit {} not found in stack", short)),
+            Err(e) => return Err(eyre!("Failed to start rebase: {}", e)),
+        }
 
-        // Run arc diff interactively — user writes the revision description
+        // Run arc diff interactively — arc creates a revision and amends the
+        // commit to add a `Differential Revision:` trailer.
         let status = Command::new("arc")
             .current_dir(&repo.workdir)
             .args(["diff", "HEAD^"])
             .status();
 
-        // After arc finishes, check if it added a Differential Revision trailer
+        // Parse revision ID from the (possibly amended) commit
         let msg = repo.git_pub(&["log", "-1", "--format=%B"])
             .unwrap_or_default();
         let revision_id = parse_revision_id(&msg);
 
-        let _ = repo.git_pub(&["checkout", "--quiet", &branch]);
+        // Continue rebase to replay the rest of the stack
+        let rebase_ok = match repo.rebase_continue() {
+            Ok(true) => true,
+            Ok(false) => false, // conflicts
+            Err(_) => false,
+        };
 
         match status {
             Ok(s) if s.success() => {
-                match revision_id {
-                    Some(id) => Ok(format!("Revision created: D{}", id)),
-                    None => Ok("Revision created (could not parse ID — add Differential Revision: trailer to commit)".to_string()),
+                let id_str = revision_id
+                    .map(|id| format!("D{}", id))
+                    .unwrap_or_else(|| "unknown".to_string());
+                if rebase_ok {
+                    Ok(format!("Revision created: {}", id_str))
+                } else {
+                    Ok(format!("Revision created: {} (rebase has conflicts — resolve and run `git rebase --continue`)", id_str))
                 }
             }
-            Ok(_) => Err(eyre!("arc diff failed")),
-            Err(e) => Err(eyre!("arc not found: {}", e)),
+            Ok(_) => {
+                // arc failed — abort the rebase to restore state
+                let _ = repo.rebase_abort();
+                Err(eyre!("arc diff failed"))
+            }
+            Err(e) => {
+                let _ = repo.rebase_abort();
+                Err(eyre!("arc not found: {}", e))
+            }
         }
     }
 
     fn update(
         &self, repo: &Repo, hash: &str, _subject: &str, _base: &str,
     ) -> Result<String> {
-        let branch = repo.get_current_branch()?;
+        let short = &hash[..7.min(hash.len())];
 
-        repo.git_pub(&["checkout", "--quiet", hash])?;
-
-        // Try to get revision ID from commit message
-        let msg = repo.git_pub(&["log", "-1", "--format=%B"])
+        // Get revision ID from the commit message before rebasing
+        let msg = repo.git_pub(&["log", "-1", "--format=%B", hash])
             .unwrap_or_default();
         let revision_id = parse_revision_id(&msg);
 
+        // Pause rebase at the target commit
+        match repo.rebase_edit_commit(short) {
+            Ok(false) => {}
+            Ok(true) => return Err(eyre!("Commit {} not found in stack", short)),
+            Err(e) => return Err(eyre!("Failed to start rebase: {}", e)),
+        }
+
+        // Run arc diff to update the existing revision
         let status = match &revision_id {
             Some(id) => {
                 Command::new("arc")
@@ -72,6 +99,7 @@ impl Forge for Phabricator {
                     .status()
             }
             None => {
+                // No revision ID — arc will try to detect from commit message
                 Command::new("arc")
                     .current_dir(&repo.workdir)
                     .args(["diff", "HEAD^"])
@@ -79,43 +107,53 @@ impl Forge for Phabricator {
             }
         };
 
-        let _ = repo.git_pub(&["checkout", "--quiet", &branch]);
+        // Continue rebase
+        let rebase_ok = match repo.rebase_continue() {
+            Ok(true) => true,
+            Ok(false) => false,
+            Err(_) => false,
+        };
 
         match status {
             Ok(s) if s.success() => {
-                match revision_id {
-                    Some(id) => Ok(format!("Revision updated: D{}", id)),
-                    None => Ok("Revision updated".to_string()),
+                let id_str = revision_id
+                    .map(|id| format!("D{}", id))
+                    .unwrap_or_else(|| "unknown".to_string());
+                if rebase_ok {
+                    Ok(format!("Revision updated: {}", id_str))
+                } else {
+                    Ok(format!("Revision updated: {} (rebase has conflicts — resolve and run `git rebase --continue`)", id_str))
                 }
             }
-            Ok(_) => Err(eyre!("arc diff failed")),
-            Err(e) => Err(eyre!("arc not found: {}", e)),
+            Ok(_) => {
+                let _ = repo.rebase_abort();
+                Err(eyre!("arc diff failed"))
+            }
+            Err(e) => {
+                let _ = repo.rebase_abort();
+                Err(eyre!("arc not found: {}", e))
+            }
         }
     }
 
     fn list_open(&self, _repo: &Repo) -> (HashMap<String, u32>, bool) {
-        // Phabricator doesn't track via branches
         (HashMap::new(), false)
     }
 
     fn edit_base(&self, _repo: &Repo, _branch: &str, _base: &str) -> bool {
-        true // Not applicable
+        true
     }
 
     fn mark_submitted(&self, repo: &Repo, patches: &mut [PatchEntry]) {
-        // Scan commit messages for "Differential Revision:" trailers
+        // Scan commit messages for "Differential Revision:" trailers.
+        // These trailers are added by arc diff during submit and preserved
+        // through rebases, so they persist in the branch history.
         for patch in patches.iter_mut() {
-            if let Some(id) = parse_revision_id(&patch.body) {
+            let full = repo.git_pub(&["log", "-1", "--format=%B", &patch.hash])
+                .unwrap_or_default();
+            if let Some(id) = parse_revision_id(&full) {
                 patch.status = PatchStatus::Submitted;
                 patch.pr_number = Some(id);
-            } else {
-                // Also check the full commit message (subject + body)
-                let full = repo.git_pub(&["log", "-1", "--format=%B", &patch.hash])
-                    .unwrap_or_default();
-                if let Some(id) = parse_revision_id(&full) {
-                    patch.status = PatchStatus::Submitted;
-                    patch.pr_number = Some(id);
-                }
             }
         }
     }
@@ -124,6 +162,9 @@ impl Forge for Phabricator {
         &self, repo: &Repo, patches: &[PatchEntry],
         on_progress: &dyn Fn(&str),
     ) -> Result<Vec<String>> {
+        // For sync, we use detached HEAD since we just need to upload the
+        // latest diff — the Differential Revision trailer is already in the
+        // commit from the initial submit. arc detects it automatically.
         let branch = repo.get_current_branch()?;
         let mut updates = Vec::new();
 
@@ -141,8 +182,7 @@ impl Forge for Phabricator {
                 continue;
             }
 
-            // Use --verbatim to skip message editing, and pipe stdin from
-            // /dev/null to prevent arc from waiting for interactive input.
+            // Non-interactive: skip editor, provide message, close stdin
             let status = Command::new("arc")
                 .current_dir(&repo.workdir)
                 .args(["diff", "HEAD^", "--update", &format!("D{}", id),
@@ -171,7 +211,6 @@ fn parse_revision_id(message: &str) -> Option<u32> {
     for line in message.lines() {
         let line = line.trim();
         if line.starts_with("Differential Revision:") {
-            // Extract DXXXX from URL or bare reference
             if let Some(d_pos) = line.rfind('D') {
                 let num_str: String = line[d_pos + 1..]
                     .chars()
