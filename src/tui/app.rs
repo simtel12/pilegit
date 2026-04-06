@@ -127,7 +127,7 @@ impl App {
         match &self.mode {
             Mode::Normal => "↑k/↓j:move  V/Shift+↑↓:select  Ctrl+↑↓:reorder  e:edit  i:insert  x:remove  d:diff  r:rebase  p:submit/update PR  s:sync PRs  u:undo  Ctrl+r:redo  ?:help  q:quit",
             Mode::Select => "Shift+↑↓ or j/k:extend selection  s:squash  Esc:cancel",
-            Mode::DiffView => "↑k/↓j:scroll  Ctrl+d/u:half-page  q/Esc:back",
+            Mode::DiffView => "↑k/↓j:scroll  Ctrl+↑↓:half-page  q/Esc:back",
             Mode::HistoryView => "q/Esc:back",
             Mode::Help => "q/Esc:close",
             Mode::InsertChoice => "a:insert after cursor  t:insert at top  Esc:cancel",
