@@ -151,15 +151,15 @@ pub fn check_dependencies(config: &Config) {
     }
 
     // Platform-specific CLI
-    let (tool, min_ver, install_hint) = match config.forge.forge_type.as_str() {
-        "github" => ("gh", (2, 0), "https://cli.github.com/"),
-        "gitlab" => ("glab", (1, 20), "https://gitlab.com/gitlab-org/cli"),
-        "gitea" => ("tea", (0, 9), "https://gitea.com/gitea/tea"),
-        "phabricator" => ("arc", (0, 0), "arcanist"),
+    let (tool, version_args, min_ver, install_hint): (&str, &[&str], (u32, u32), &str) = match config.forge.forge_type.as_str() {
+        "github" => ("gh", &["--version"], (2, 0), "https://cli.github.com/"),
+        "gitlab" => ("glab", &["--version"], (1, 20), "https://gitlab.com/gitlab-org/cli"),
+        "gitea" => ("tea", &["--version"], (0, 9), "https://gitea.com/gitea/tea"),
+        "phabricator" => ("arc", &["version"], (0, 0), "arcanist"),
         _ => return, // custom — no CLI dependency
     };
 
-    match get_tool_version(tool, &["--version"]) {
+    match get_tool_version(tool, version_args) {
         Some(v) => {
             if min_ver != (0, 0) {
                 if let Some(major_minor) = parse_version(&v) {
@@ -188,14 +188,23 @@ pub fn check_dependencies(config: &Config) {
     eprintln!();
 }
 
-/// Run `tool --version` and return the raw output string.
+/// Run `tool <args>` and return the raw output string.
+/// Checks stdout first, falls back to stderr (some tools like arc output to stderr).
+/// Accepts non-zero exit codes as long as output is produced.
 fn get_tool_version(tool: &str, args: &[&str]) -> Option<String> {
-    std::process::Command::new(tool)
+    let output = std::process::Command::new(tool)
         .args(args)
         .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !stdout.is_empty() {
+        return Some(stdout);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !stderr.is_empty() {
+        return Some(stderr);
+    }
+    None
 }
 
 /// Parse a major.minor version from a version string like "git version 2.43.0".
