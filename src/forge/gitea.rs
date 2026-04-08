@@ -154,7 +154,10 @@ impl Forge for Gitea {
                         if state != "open" { continue; }
 
                         let num = pr["index"].as_u64()
-                            .or_else(|| pr["number"].as_u64());
+                            .or_else(|| pr["number"].as_u64())
+                            // tea returns numbers as strings
+                            .or_else(|| pr["index"].as_str()?.parse::<u64>().ok())
+                            .or_else(|| pr["number"].as_str()?.parse::<u64>().ok());
                         // head can be a string or an object with a "name" field
                         let head = pr["head"].as_str()
                             .or_else(|| pr["head"]["name"].as_str())
