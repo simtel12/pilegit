@@ -168,15 +168,24 @@ impl Repo {
         Ok(())
     }
 
+    /// Get git's own abbreviated hash for a commit.
+    /// This ensures sed patterns match the rebase todo format.
+    fn abbrev(&self, hash: &str) -> String {
+        self.git(&["rev-parse", "--short", hash])
+            .unwrap_or_else(|_| hash.to_string())
+            .trim().to_string()
+    }
+
     /// Start an interactive rebase with a specific commit marked as "edit".
     /// Git will replay commits up to that point and pause, letting the user
     /// modify the working tree. Returns Ok(false) if paused for editing,
     /// Ok(true) if the commit wasn't in range (shouldn't normally happen).
     pub fn rebase_edit_commit(&self, short_hash: &str) -> Result<bool> {
         let base = self.detect_base()?;
+        let abbr = self.abbrev(short_hash);
         let sed_cmd = format!(
             "sed -i 's/^pick {}/edit {}/'",
-            short_hash, short_hash
+            abbr, abbr
         );
         let _result = Command::new("git")
             .current_dir(&self.workdir)
@@ -196,9 +205,10 @@ impl Repo {
     /// commit. This pauses the rebase so the user can insert a new commit.
     pub fn rebase_break_after(&self, short_hash: &str) -> Result<bool> {
         let base = self.detect_base()?;
+        let abbr = self.abbrev(short_hash);
         let sed_cmd = format!(
             "sed -i '/^pick {}/a break'",
-            short_hash
+            abbr
         );
         let _result = Command::new("git")
             .current_dir(&self.workdir)
@@ -226,7 +236,10 @@ impl Repo {
         // Build sed: first hash stays pick, rest become squash
         let sed_parts: Vec<String> = hashes[1..]
             .iter()
-            .map(|h| format!("s/^pick {}/squash {}/", h, h))
+            .map(|h| {
+                let abbr = self.abbrev(h);
+                format!("s/^pick {}/squash {}/", abbr, abbr)
+            })
             .collect();
         let seq_editor = format!("sed -i '{}'", sed_parts.join("; "));
 
@@ -265,10 +278,11 @@ impl Repo {
     /// Returns Ok(true) if clean, Ok(false) if conflicts.
     pub fn remove_commit(&self, short_hash: &str) -> Result<bool> {
         let base = self.detect_base()?;
+        let abbr = self.abbrev(short_hash);
         // Change "pick <hash>" to "drop <hash>" in the rebase todo
         let sed_cmd = format!(
             "sed -i 's/^pick {}/drop {}/'",
-            short_hash, short_hash
+            abbr, abbr
         );
         let result = Command::new("git")
             .current_dir(&self.workdir)
@@ -297,13 +311,16 @@ impl Repo {
     pub fn swap_commits(&self, hash_below: &str, hash_above: &str) -> Result<bool> {
         let base = self.detect_base()?;
 
+        let abbrev_below = self.abbrev(hash_below);
+        let abbrev_above = self.abbrev(hash_above);
+
         // Strategy: in the rebase todo, the older commit (hash_below) appears
         // first. We want to swap their order. Use sed to:
         // 1. When we see the line for hash_below, hold it and delete
         // 2. When we see the line for hash_above, print it, then print the held line
         let sed_cmd = format!(
             "sed -i '/^pick {}/{{ h; d }}; /^pick {}/{{ p; x }}'",
-            hash_below, hash_above
+            abbrev_below, abbrev_above
         );
         let result = Command::new("git")
             .current_dir(&self.workdir)

@@ -294,6 +294,10 @@ impl App {
 
         match crate::git::ops::Repo::open().and_then(|r| r.swap_commits(&hash_below, &hash_above)) {
             Ok(true) => {
+                // Fix dependency trailers after reorder (e.g. "Depends on DXXX" for Phabricator)
+                if let Ok(r) = crate::git::ops::Repo::open() {
+                    let _ = self.forge.fix_dependencies(&r);
+                }
                 if let Err(e) = self.reload_stack() {
                     self.notify(format!("Reload failed: {}", e));
                     return;
@@ -323,6 +327,10 @@ impl App {
 
         match crate::git::ops::Repo::open().and_then(|r| r.swap_commits(&hash_below, &hash_above)) {
             Ok(true) => {
+                // Fix dependency trailers after reorder (e.g. "Depends on DXXX" for Phabricator)
+                if let Ok(r) = crate::git::ops::Repo::open() {
+                    let _ = self.forge.fix_dependencies(&r);
+                }
                 if let Err(e) = self.reload_stack() {
                     self.notify(format!("Reload failed: {}", e));
                     return;
