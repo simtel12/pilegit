@@ -403,29 +403,17 @@ impl Forge for Phabricator {
                     .output();
             }
 
-            // Write commit message to temp file. This contains the updated
-            // "Depends on DXXX" line that we want in the revision description.
-            let msg = repo.git_pub(&["log", "-1", "--format=%B"])
-                .unwrap_or_default();
-            let msg_file = std::env::temp_dir().join(format!(
-                "pgit-arc-sync-{}.txt", std::process::id()
-            ));
-            let _ = std::fs::write(&msg_file, msg.trim());
-
             // Run arc diff to update both the code diff and the revision description.
-            // EDITOR="cp <msg_file>" replaces arc's editor file with our commit
-            // message, which arc parses to update the revision description
-            // (including "Depends on DXXX" for the Phabricator stack).
+            // arc reads the commit message (with our updated "Depends on DXXX")
+            // and uses it to update the revision description automatically.
+            // --message sets the update comment (without opening an editor).
             // stdin null prevents interactive prompts.
-            let editor_cmd = format!("cp {} ", msg_file.display());
             let status = Command::new("arc")
                 .current_dir(&repo.workdir)
-                .args(["diff", "HEAD^", "--update", &format!("D{}", id)])
-                .env("EDITOR", &editor_cmd)
+                .args(["diff", "HEAD^", "--update", &format!("D{}", id),
+                    "--message", "Updated diff"])
                 .stdin(std::process::Stdio::null())
                 .status();
-
-            let _ = std::fs::remove_file(&msg_file);
 
             match status {
                 Ok(s) if s.success() => {
