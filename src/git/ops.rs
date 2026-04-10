@@ -435,31 +435,57 @@ impl Repo {
         sanitized[..20.min(sanitized.len())].trim_end_matches('-').to_string()
     }
 
+    /// List all local pgit branches for the current user.
+    pub fn list_pgit_branches(&self) -> Vec<String> {
+        let user = self.get_pgit_username();
+        let prefix = format!("pgit/{}/", user);
+        let local = self.git(&["branch", "--list", &format!("{}*", prefix), "--format=%(refname:short)"])
+            .unwrap_or_default();
+        local.lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect()
+    }
+
+    /// Check if a branch's tip commit is an ancestor of the base branch.
+    /// True for merge-commit and fast-forward merges where the original
+    /// commit is preserved.
+    pub fn branch_is_in_base(&self, branch: &str) -> bool {
+        let base = self.detect_base().unwrap_or_else(|_| "origin/main".to_string());
+        self.git(&["merge-base", "--is-ancestor", branch, &base]).is_ok()
+    }
+
     /// Find stale pgit branches using the forge's open PR list.
+    /// Returns branches that are either:
+    ///   - Not in the open PR list (closed/merged on the forge), or
+    ///   - Whose commit is now reachable from the base branch
+    /// For forge-specific stale detection (e.g. Phabricator trailer matching),
+    /// the forge implementation should provide additional logic.
     pub fn find_stale_branches_with(
         &self,
         open_prs: &std::collections::HashMap<String, u32>,
         gh_available: bool,
     ) -> Vec<String> {
-        if !gh_available { return Vec::new(); }
-
-        let user = self.get_pgit_username();
-        let prefix = format!("pgit/{}/", user);
-        let local = self.git(&["branch", "--list", &format!("{}*", prefix), "--format=%(refname:short)"])
-            .unwrap_or_default();
-        let local_branches: Vec<String> = local.lines()
-            .map(|l| l.trim().to_string())
-            .filter(|l| !l.is_empty())
-            .collect();
-
+        let local_branches = self.list_pgit_branches();
         if local_branches.is_empty() { return Vec::new(); }
 
         local_branches.into_iter()
-            .filter(|b| !open_prs.contains_key(b))
+            .filter(|b| {
+                // Only trust the open_prs check if the listing returned at least
+                // one result. An empty listing likely means the CLI query failed
+                // or returned no matches — treating all branches as stale would
+                // be destructive.
+                if gh_available && !open_prs.is_empty() && !open_prs.contains_key(b) {
+                    return true;
+                }
+                // Stale if branch's commit is now an ancestor of base
+                self.branch_is_in_base(b)
+            })
             .collect()
     }
 
-    /// Delete branches both locally and on the remote.
+    /// Delete branches locally and on the remote.
+    /// Only called after confirming branches are stale (MR merged/closed).
     pub fn delete_branches(&self, branches: &[String]) {
         for branch in branches {
             let _ = self.git(&["branch", "-D", branch]);

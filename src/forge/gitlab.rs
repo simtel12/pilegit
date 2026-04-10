@@ -140,31 +140,59 @@ impl Forge for GitLab {
 
 impl GitLab {
     /// Fetch open MRs with full data (IID + URL).
+    /// Parses text output of `glab mr list`. When stdout is piped
+    /// (as with Command::output), glab disables the pager and outputs
+    /// full-width untruncated text.
     fn list_open_full(&self, repo: &Repo) -> (HashMap<String, (u32, String)>, bool) {
         let mut map = HashMap::new();
+
         let output = Command::new("glab")
             .current_dir(&repo.workdir)
-            .args(["mr", "list", "--mine",
-                "--json", "iid,source_branch,web_url"])
+            .args(["mr", "list", "-P", "100"])
+            .env("PAGER", "cat")
+            .env("GLAB_PAGER", "")
+            .env("NO_COLOR", "1")
             .output();
+
         match output {
             Ok(out) if out.status.success() => {
-                let json = String::from_utf8_lossy(&out.stdout);
-                if let Ok(mrs) = serde_json::from_str::<Vec<serde_json::Value>>(&json) {
-                    for mr in mrs {
-                        // glab may use snake_case or camelCase depending on version
-                        let num = mr["iid"].as_u64();
-                        let head = mr["source_branch"].as_str()
-                            .or_else(|| mr["sourceBranch"].as_str());
-                        let url = mr["web_url"].as_str()
-                            .or_else(|| mr["webUrl"].as_str())
-                            .unwrap_or("").to_string();
+                let text = String::from_utf8_lossy(&out.stdout);
+                let base_url = self.get_project_url(repo);
 
-                        if let (Some(num), Some(head)) = (num, head) {
-                            if head.starts_with("pgit/") {
-                                map.insert(head.to_string(), (num as u32, url));
-                            }
-                        }
+                for line in text.lines() {
+                    let clean = strip_ansi(line).trim().to_string();
+                    if !clean.starts_with('!') { continue; }
+
+                    // Extract IID from !<number>
+                    let iid: u32 = match clean.strip_prefix('!')
+                        .and_then(|s| s.split_whitespace().next())
+                        .and_then(|s| s.parse().ok()) {
+                        Some(n) => n,
+                        None => continue,
+                    };
+
+                    // Format: !N  project!N  title  (target) ← (source)
+                    // Source branch (ours) is AFTER ←.
+                    // If no ←, take the last pgit/ branch in the line.
+                    let source = if let Some(arrow_pos) = clean.find('←') {
+                        let after_arrow = &clean[arrow_pos..];
+                        after_arrow.split_whitespace()
+                            .map(|w| w.trim_matches(|c: char| c == '(' || c == ')'))
+                            .find(|w| w.starts_with("pgit/"))
+                    } else {
+                        // No arrow — find the last pgit/ branch
+                        clean.split_whitespace()
+                            .map(|w| w.trim_matches(|c: char| c == '(' || c == ')'))
+                            .filter(|w| w.starts_with("pgit/"))
+                            .last()
+                    };
+
+                    if let Some(branch) = source {
+                        let url = match &base_url {
+                            Some(u) => format!("{}/-/merge_requests/{}", u, iid),
+                            None => String::new(),
+                        };
+                        map.insert(branch.to_string(), (iid, url));
                     }
                 }
                 (map, true)
@@ -173,19 +201,42 @@ impl GitLab {
         }
     }
 
+    /// Get the project web URL from the git remote.
+    fn get_project_url(&self, repo: &Repo) -> Option<String> {
+        let remote = repo.git_pub(&["remote", "get-url", "origin"]).ok()?;
+        let remote = remote.trim();
+        // git@gitlab.com:user/repo.git → https://gitlab.com/user/repo
+        if remote.starts_with("git@") {
+            let rest = remote.strip_prefix("git@")?;
+            let (host, path) = rest.split_once(':')?;
+            let path = path.strip_suffix(".git").unwrap_or(path);
+            Some(format!("https://{}/{}", host, path))
+        } else {
+            // https://gitlab.com/user/repo.git → https://gitlab.com/user/repo
+            Some(remote.strip_suffix(".git").unwrap_or(remote).to_string())
+        }
+    }
+
     /// Look up the MR IID for a source branch.
     fn get_mr_iid(&self, repo: &Repo, branch: &str) -> Option<String> {
-        let output = Command::new("glab")
-            .current_dir(&repo.workdir)
-            .args(["mr", "view", branch, "--json", "iid"])
-            .stderr(std::process::Stdio::null())
-            .output().ok()?;
-        if output.status.success() {
-            let json = String::from_utf8_lossy(&output.stdout);
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json) {
-                return v["iid"].as_u64().map(|n| n.to_string());
-            }
-        }
-        None
+        let (mrs, available) = self.list_open_full(repo);
+        if !available { return None; }
+        mrs.get(branch).map(|(iid, _)| iid.to_string())
     }
+}
+
+/// Strip ANSI escape codes from a string.
+fn strip_ansi(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut in_escape = false;
+    for c in s.chars() {
+        if c == '\x1b' {
+            in_escape = true;
+        } else if in_escape {
+            if c == 'm' { in_escape = false; }
+        } else {
+            result.push(c);
+        }
+    }
+    result
 }

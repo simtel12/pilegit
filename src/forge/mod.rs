@@ -50,10 +50,19 @@ pub trait Forge {
     /// Phabricator, "Change-Id:" for Gerrit). Default: none.
     fn get_trailers(&self, _body: &str) -> Vec<String> { Vec::new() }
 
-    /// Fix dependency trailers across all commits in the stack.
+    /// Find dependency trailers across all commits in the stack.
     /// Called after rebase or before sync when commit order may have changed.
     /// Default: no-op. Phabricator uses this to update "Depends on DXXX".
     fn fix_dependencies(&self, _repo: &Repo) -> Result<()> { Ok(()) }
+
+    /// Detect forge-specific stale branches that aren't caught by ancestor checks.
+    /// E.g. Phabricator's `arc land` squashes commits into a new hash but
+    /// preserves the `Differential Revision:` trailer — this method matches
+    /// branches by trailer against the base branch history.
+    /// Default: no-op (returns empty).
+    fn find_landed_branches(&self, _repo: &Repo, _branches: &[String]) -> Vec<String> {
+        Vec::new()
+    }
 
     /// Display name of the platform.
     fn name(&self) -> &str;

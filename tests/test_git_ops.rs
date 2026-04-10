@@ -328,3 +328,100 @@ fn has_uncommitted_changes_ignores_pilegit_toml() {
     assert!(repo.has_uncommitted_changes());
     cleanup(&dir);
 }
+
+#[test]
+fn find_stale_branches_detects_landed_via_trailer() {
+    let dir = setup_repo("stale_trailer");
+
+    // Create a commit with a Differential Revision trailer (simulates submitted diff)
+    std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+    Command::new("git").current_dir(&dir).args(["add", "."]).output().unwrap();
+    Command::new("git").current_dir(&dir)
+        .args(["commit", "-m", "feat: add a\n\nDifferential Revision: https://p.example.com/D12345"])
+        .output().unwrap();
+
+    let repo = open_repo(&dir);
+    let commits = repo.list_stack_commits().unwrap();
+    let original_hash = commits[0].hash.clone();
+
+    Command::new("git").current_dir(&dir)
+        .args(["config", "user.name", "test-user"]).output().unwrap();
+
+    // Create a pgit branch pointing to the original commit
+    let branch = repo.make_pgit_branch_name("feat: add a");
+    Command::new("git").current_dir(&dir)
+        .args(["branch", &branch, &original_hash]).output().unwrap();
+
+    let forge = pilegit::forge::phabricator::Phabricator;
+    use pilegit::forge::Forge;
+
+    // Initially: trailer not in origin/main → not landed
+    let landed = forge.find_landed_branches(&repo, &[branch.clone()]);
+    assert!(landed.is_empty());
+
+    // Simulate arc land: create a NEW commit with same trailer but different hash,
+    // and update origin/main to point at it
+    Command::new("git").current_dir(&dir)
+        .args(["checkout", "--orphan", "landed"]).output().unwrap();
+    Command::new("git").current_dir(&dir)
+        .args(["reset", "--hard"]).output().unwrap();
+    std::fs::write(dir.join("README.md"), "# test\n").unwrap();
+    std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+    Command::new("git").current_dir(&dir).args(["add", "."]).output().unwrap();
+    Command::new("git").current_dir(&dir)
+        .args(["commit", "-m", "feat: add a (landed)\n\nDifferential Revision: https://p.example.com/D12345"])
+        .output().unwrap();
+    let landed_hash = String::from_utf8(
+        Command::new("git").current_dir(&dir)
+            .args(["rev-parse", "HEAD"]).output().unwrap().stdout
+    ).unwrap().trim().to_string();
+
+    // Verify the hash actually changed (arc land squashes/rewrites)
+    assert_ne!(original_hash, landed_hash, "landed commit should have different hash");
+
+    Command::new("git").current_dir(&dir)
+        .args(["update-ref", "refs/remotes/origin/main", &landed_hash])
+        .output().unwrap();
+
+    // Now the trailer matches a commit in origin/main → landed
+    let landed = forge.find_landed_branches(&repo, &[branch.clone()]);
+    assert_eq!(landed.len(), 1);
+    assert_eq!(landed[0], branch);
+    cleanup(&dir);
+}
+
+#[test]
+fn find_stale_branches_detects_landed_commits() {
+    use std::collections::HashMap;
+
+    let dir = setup_repo("stale_landed");
+    add_commit(&dir, "a.txt", "a\n", "feat: add a");
+
+    let repo = open_repo(&dir);
+    let commits = repo.list_stack_commits().unwrap();
+
+    // Configure git user for branch naming
+    Command::new("git").current_dir(&dir)
+        .args(["config", "user.name", "test-user"]).output().unwrap();
+
+    // Create a pgit branch pointing to the commit
+    let branch = repo.make_pgit_branch_name("feat: add a");
+    Command::new("git").current_dir(&dir)
+        .args(["branch", &branch, &commits[0].hash]).output().unwrap();
+
+    // Initially: branch is NOT an ancestor of origin/main (the commit is ahead)
+    // gh_available=false, no open PRs → branch should NOT be stale
+    let stale = repo.find_stale_branches_with(&HashMap::new(), false);
+    assert!(stale.is_empty(), "branch should not be stale before landing");
+
+    // Simulate landing: update origin/main to point at our commit
+    Command::new("git").current_dir(&dir)
+        .args(["update-ref", "refs/remotes/origin/main", &commits[0].hash])
+        .output().unwrap();
+
+    // Now the branch's commit is reachable from origin/main → stale
+    let stale = repo.find_stale_branches_with(&HashMap::new(), false);
+    assert_eq!(stale.len(), 1);
+    assert_eq!(stale[0], branch);
+    cleanup(&dir);
+}

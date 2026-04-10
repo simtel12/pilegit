@@ -341,6 +341,33 @@ impl Forge for Phabricator {
         Ok(())
     }
 
+    fn find_landed_branches(&self, repo: &Repo, branches: &[String]) -> Vec<String> {
+        // arc land squashes commits into a new hash but preserves the
+        // "Differential Revision:" trailer in the landed commit. For each
+        // branch, parse its trailer and search the base branch for a matching one.
+        let base = repo.detect_base().unwrap_or_else(|_| "origin/main".to_string());
+        let mut landed = Vec::new();
+        for b in branches {
+            let msg = repo.git_pub(&["log", "-1", "--format=%B", b])
+                .unwrap_or_default();
+            for line in msg.lines() {
+                let line = line.trim();
+                if let Some(rest) = line.strip_prefix("Differential Revision:") {
+                    let trailer = rest.trim();
+                    let pattern = format!("Differential Revision: {}", trailer);
+                    let found = repo.git_pub(&[
+                        "log", &base, "--grep", &pattern, "-1", "--format=%H",
+                    ]).unwrap_or_default();
+                    if !found.trim().is_empty() {
+                        landed.push(b.clone());
+                        break;
+                    }
+                }
+            }
+        }
+        landed
+    }
+
     fn mark_submitted(&self, repo: &Repo, patches: &mut [PatchEntry]) {
         // Scan commit messages for "Differential Revision:" trailers.
         // These trailers are added by arc diff during submit and preserved

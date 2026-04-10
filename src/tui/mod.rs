@@ -740,7 +740,16 @@ fn handle_sync_prs(app: &mut App) -> Result<()> {
 fn prompt_cleanup_stale_branches(app: &App) -> Result<()> {
     let repo = Repo::open()?;
     let (open_prs, gh_avail) = app.forge.list_open(&repo);
-    let stale = repo.find_stale_branches_with(&open_prs, gh_avail);
+    let mut stale = repo.find_stale_branches_with(&open_prs, gh_avail);
+
+    // Also check forge-specific landed branches (e.g. Phabricator trailer match)
+    let all_branches = repo.list_pgit_branches();
+    let landed = app.forge.find_landed_branches(&repo, &all_branches);
+    for b in landed {
+        if !stale.contains(&b) {
+            stale.push(b);
+        }
+    }
 
     if stale.is_empty() {
         return Ok(());
