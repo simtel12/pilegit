@@ -55,6 +55,7 @@ pgit status   # show stack non-interactively
 | `r` | Rebase onto base branch + sync PRs |
 | `p` | Submit or update PR for commit |
 | `s` | Sync all submitted PRs |
+| `R` | Refresh stack display (re-reads commits from git) |
 | `u` / `Ctrl+r` | Undo / redo (restores git state) |
 | `h` | View undo/redo history |
 | `?` | Full help screen |

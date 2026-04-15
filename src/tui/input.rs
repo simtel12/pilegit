@@ -115,6 +115,14 @@ pub fn handle_normal(app: &mut App, key: KeyEvent) {
         // Sync all submitted PRs (force-push + update bases)
         KeyCode::Char('s') => app.sync_all_prs(),
 
+        // Refresh stack display (re-reads commits from git)
+        KeyCode::Char('R') => {
+            match app.reload_stack() {
+                Ok(()) => app.notify("Stack refreshed."),
+                Err(e) => app.notify(format!("Refresh failed: {}", e)),
+            }
+        }
+
         // Undo
         KeyCode::Char('u') => app.undo(),
 

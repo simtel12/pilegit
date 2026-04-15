@@ -39,27 +39,33 @@ impl Forge for Phabricator {
             Err(e) => return Err(eyre!("Failed to start rebase: {}", e)),
         }
 
-        // Check if the parent commit (HEAD^) has a Differential Revision trailer.
-        // If so, add "Depends on DXXX" to the current commit for Phabricator stacking.
-        let parent_msg = repo.git_pub(&["log", "-1", "--format=%B", "HEAD^"])
-            .unwrap_or_default();
-        if let Some(parent_id) = parse_revision_id(&parent_msg) {
-            let current_msg = repo.git_pub(&["log", "-1", "--format=%B"])
+        // Check if the parent commit (HEAD^) has a Differential Revision trailer
+        // AND is still in the stack (not already landed in the base branch).
+        // If the parent is in base, its diff is already landed — no dependency needed.
+        let repo_base = repo.detect_base().unwrap_or_else(|_| "origin/main".to_string());
+        let parent_in_base = repo.git_pub(&["merge-base", "--is-ancestor", "HEAD^", &repo_base])
+            .is_ok();
+        if !parent_in_base {
+            let parent_msg = repo.git_pub(&["log", "-1", "--format=%B", "HEAD^"])
                 .unwrap_or_default();
-            let current_trimmed = current_msg.trim();
+            if let Some(parent_id) = parse_revision_id(&parent_msg) {
+                let current_msg = repo.git_pub(&["log", "-1", "--format=%B"])
+                    .unwrap_or_default();
+                let current_trimmed = current_msg.trim();
 
-            // Remove any existing Depends on line, then add the correct one
-            let without_depends: String = current_trimmed.lines()
-                .filter(|l| !l.trim().starts_with("Depends on D"))
-                .collect::<Vec<_>>()
-                .join("\n");
-            let new_msg = format!("{}\n\nDepends on D{}", without_depends.trim(), parent_id);
+                // Remove any existing Depends on line, then add the correct one
+                let without_depends: String = current_trimmed.lines()
+                    .filter(|l| !l.trim().starts_with("Depends on D"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let new_msg = format!("{}\n\nDepends on D{}", without_depends.trim(), parent_id);
 
-            if new_msg != current_trimmed {
-                let _ = Command::new("git")
-                    .current_dir(&repo.workdir)
-                    .args(["commit", "--amend", "--message", &new_msg])
-                    .output();
+                if new_msg != current_trimmed {
+                    let _ = Command::new("git")
+                        .current_dir(&repo.workdir)
+                        .args(["commit", "--amend", "--message", &new_msg])
+                        .output();
+                }
             }
         }
 
@@ -138,9 +144,12 @@ impl Forge for Phabricator {
             Err(e) => return Err(eyre!("Failed to start rebase: {}", e)),
         }
 
-        // Update "Depends on DXXX" based on current parent commit
-        let parent_msg = repo.git_pub(&["log", "-1", "--format=%B", "HEAD^"])
-            .unwrap_or_default();
+        // Update "Depends on DXXX" based on current parent commit.
+        // Skip if parent is already in the base branch (diff already landed).
+        let base = repo.detect_base().unwrap_or_else(|_| "origin/main".to_string());
+        let parent_in_base = repo.git_pub(&["merge-base", "--is-ancestor", "HEAD^", &base])
+            .is_ok();
+
         let current_msg = repo.git_pub(&["log", "-1", "--format=%B"])
             .unwrap_or_default();
         let current_trimmed = current_msg.trim();
@@ -152,9 +161,13 @@ impl Forge for Phabricator {
             .join("\n");
         let mut new_msg = without_depends.trim().to_string();
 
-        // Add new Depends on if parent has a revision
-        if let Some(parent_id) = parse_revision_id(&parent_msg) {
-            new_msg.push_str(&format!("\n\nDepends on D{}", parent_id));
+        // Add new Depends on only if parent is in the stack (not in base)
+        if !parent_in_base {
+            let parent_msg = repo.git_pub(&["log", "-1", "--format=%B", "HEAD^"])
+                .unwrap_or_default();
+            if let Some(parent_id) = parse_revision_id(&parent_msg) {
+                new_msg.push_str(&format!("\n\nDepends on D{}", parent_id));
+            }
         }
 
         if new_msg != current_trimmed {
@@ -260,12 +273,14 @@ impl Forge for Phabricator {
                         .parse::<u32>().ok()
                 });
 
-            // Find parent's revision ID
+            // Find parent's revision ID, but only if parent is in the stack
+            // (not in the base branch). If parent is in base, no dependency needed.
             let parent_rev = if i > 0 {
                 let parent_msg = repo.git_pub(&["log", "-1", "--format=%B", &commits[i - 1].hash])
                     .unwrap_or_default();
                 parse_revision_id(&parent_msg)
             } else {
+                // First commit in stack — parent is base, no dependency
                 None
             };
 
@@ -298,9 +313,10 @@ impl Forge for Phabricator {
 
             // Only amend submitted commits (have Differential Revision trailer)
             if parse_revision_id(current_trimmed).is_some() {
-                let parent_msg = repo.git_pub(&["log", "-1", "--format=%B", "HEAD^"])
-                    .unwrap_or_default();
-                let parent_rev = parse_revision_id(&parent_msg);
+                // Check if parent is in the base branch (already landed)
+                let parent_in_base = repo.git_pub(&[
+                    "merge-base", "--is-ancestor", "HEAD^", &base
+                ]).is_ok();
 
                 // Remove existing Depends on
                 let without_depends: String = current_trimmed.lines()
@@ -309,9 +325,13 @@ impl Forge for Phabricator {
                     .join("\n");
                 let mut new_msg = without_depends.trim().to_string();
 
-                // Add correct Depends on if parent has a revision
-                if let Some(parent_id) = parent_rev {
-                    new_msg.push_str(&format!("\n\nDepends on D{}", parent_id));
+                // Add correct Depends on only if parent is in the stack
+                if !parent_in_base {
+                    let parent_msg = repo.git_pub(&["log", "-1", "--format=%B", "HEAD^"])
+                        .unwrap_or_default();
+                    if let Some(parent_id) = parse_revision_id(&parent_msg) {
+                        new_msg.push_str(&format!("\n\nDepends on D{}", parent_id));
+                    }
                 }
 
                 if new_msg != current_trimmed {

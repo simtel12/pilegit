@@ -127,7 +127,7 @@ impl App {
     /// Shortcut hints for the current mode (always shown at bottom).
     pub fn shortcuts(&self) -> &str {
         match &self.mode {
-            Mode::Normal => "↑k/↓j:move  V/Shift+↑↓:select  Ctrl+↑↓:reorder  e:edit  i:insert  x:remove  d:diff  r:rebase  p:submit/update PR  s:sync PRs  u:undo  Ctrl+r:redo  ?:help  q:quit",
+            Mode::Normal => "↑k/↓j:move  V/Shift+↑↓:select  Ctrl+↑↓:reorder  e:edit  i:insert  x:remove  d:diff  r:rebase  p:submit/update PR  s:sync PRs  R:refresh  u:undo  Ctrl+r:redo  ?:help  q:quit",
             Mode::Select => "Shift+↑↓ or j/k:extend selection  s:squash  Esc:cancel",
             Mode::DiffView => "↑k/↓j:scroll  Ctrl+↑↓:half-page  q/Esc:back",
             Mode::HistoryView => "q/Esc:back",
@@ -168,6 +168,7 @@ impl App {
    r               Rebase entire stack onto base branch
    p               Submit new PR or update existing PR
    s               Sync all submitted PRs (force-push + update bases)
+   R               Refresh stack display (re-reads commits from git)
    d               View full diff of commit at cursor
 
  HISTORY (undo/redo restores actual git state)
