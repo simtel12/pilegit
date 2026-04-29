@@ -7,6 +7,45 @@ use super::Forge;
 use crate::core::stack::{PatchEntry, PatchStatus};
 use crate::git::ops::Repo;
 
+/// If `gh` reports the repo default branch, return a ref that exists locally (`origin/<name>` first,
+/// then `<name>`). Called from [`crate::forge::stack_base_hint::try_from_forge_cli`] for [`crate::forge::ForgeKind::GitHub`].
+pub(crate) fn try_cli_default_stack_base(repo: &Repo) -> Option<String> {
+    let output = Command::new("gh")
+        .current_dir(&repo.workdir)
+        .args([
+            "repo",
+            "view",
+            "--json",
+            "defaultBranchRef",
+            "--jq",
+            ".defaultBranchRef.name",
+        ])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if name.is_empty() || name == "null" {
+        return None;
+    }
+    let origin_ref = format!("origin/{}", name);
+    if repo
+        .git_pub(&["rev-parse", "--verify", "--quiet", &origin_ref])
+        .is_ok()
+    {
+        return Some(origin_ref);
+    }
+    if repo
+        .git_pub(&["rev-parse", "--verify", "--quiet", &name])
+        .is_ok()
+    {
+        return Some(name);
+    }
+    None
+}
+
 pub struct GitHub;
 
 impl Forge for GitHub {

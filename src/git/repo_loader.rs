@@ -4,6 +4,7 @@ use color_eyre::Result;
 
 use super::ops::Repo;
 use crate::core::config::{Config, ForgeConfig, RepoConfig};
+use crate::forge::ForgeKind;
 
 /// Open the current git repo and resolve the stack base from config (if any) or heuristics.
 pub fn open_resolved() -> Result<Repo> {
@@ -15,6 +16,9 @@ pub fn open_resolved() -> Result<Repo> {
         },
         repo: RepoConfig::default(),
     });
-    let base = repo.resolve_base(config.repo.base.as_deref())?;
+    let base = repo.resolve_base(
+        config.repo.base.as_deref(),
+        ForgeKind::from_config_str(config.forge.forge_type.as_str()),
+    )?;
     Ok(repo.with_resolved_base(base))
 }

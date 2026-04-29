@@ -4,6 +4,7 @@ use std::process::Command;
 use color_eyre::{eyre::eyre, Result};
 
 use crate::core::stack::{PatchEntry, PatchStatus};
+use crate::forge::ForgeKind;
 
 /// Wrapper around a git repository.
 pub struct Repo {
@@ -39,8 +40,9 @@ impl Repo {
         }
     }
 
-    /// Use explicit `repo.base` from config when valid, otherwise [`Self::detect_base`].
-    pub fn resolve_base(&self, configured: Option<&str>) -> Result<String> {
+    /// Resolve stack base: explicit `[repo].base`, then [`crate::forge::stack_base_hint`] for the
+    /// configured forge (CLI default branch when implemented), then [`Self::detect_base`].
+    pub fn resolve_base(&self, configured: Option<&str>, forge: ForgeKind) -> Result<String> {
         if let Some(b) = configured {
             let b = b.trim();
             if !b.is_empty() {
@@ -53,6 +55,9 @@ impl Repo {
                     b
                 ));
             }
+        }
+        if let Some(b) = crate::forge::stack_base_hint::try_from_forge_cli(self, forge) {
+            return Ok(b);
         }
         self.detect_base()
     }
@@ -76,7 +81,8 @@ impl Repo {
             }
         }
         Err(eyre!(
-            "Could not detect base branch (tried origin/main, origin/master, main, master). \
+            "Could not detect base branch (tried forge CLI default for your `[forge].type`, \
+             then origin/main, origin/master, main, master). \
              Set repo.base in .pilegit.toml (for example base = \"origin/develop\") or run `pgit init`."
         ))
     }

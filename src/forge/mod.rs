@@ -3,8 +3,33 @@ pub mod gitea;
 pub mod github;
 pub mod gitlab;
 pub mod phabricator;
+pub mod stack_base_hint;
 
 use std::collections::HashMap;
+
+/// Forge platform from `.pilegit.toml` `[forge] type = ...`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ForgeKind {
+    GitHub,
+    GitLab,
+    Gitea,
+    Phabricator,
+    Custom,
+}
+
+impl ForgeKind {
+    /// Parse from config `type` string. Unknown values match [`create_forge`]: treated as GitHub.
+    pub fn from_config_str(s: &str) -> Self {
+        match s {
+            "github" => Self::GitHub,
+            "gitlab" => Self::GitLab,
+            "gitea" => Self::Gitea,
+            "phabricator" => Self::Phabricator,
+            "custom" => Self::Custom,
+            _ => Self::GitHub,
+        }
+    }
+}
 
 use color_eyre::Result;
 
@@ -151,14 +176,13 @@ pub trait Forge {
 
 /// Create the appropriate Forge based on config.
 pub fn create_forge(config: &Config) -> Box<dyn Forge> {
-    match config.forge.forge_type.as_str() {
-        "github" => Box::new(github::GitHub),
-        "gitlab" => Box::new(gitlab::GitLab),
-        "gitea" => Box::new(gitea::Gitea),
-        "phabricator" => Box::new(phabricator::Phabricator),
-        "custom" => Box::new(custom::Custom::new(
+    match ForgeKind::from_config_str(config.forge.forge_type.as_str()) {
+        ForgeKind::GitHub => Box::new(github::GitHub),
+        ForgeKind::GitLab => Box::new(gitlab::GitLab),
+        ForgeKind::Gitea => Box::new(gitea::Gitea),
+        ForgeKind::Phabricator => Box::new(phabricator::Phabricator),
+        ForgeKind::Custom => Box::new(custom::Custom::new(
             config.forge.submit_cmd.clone().unwrap_or_default(),
         )),
-        _ => Box::new(github::GitHub),
     }
 }
