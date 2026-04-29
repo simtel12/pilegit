@@ -465,6 +465,30 @@ fn handle_squash_commits(
     Ok(())
 }
 
+/// Resolve the stack commit hash to push when updating a PR (must match current `git log`, not a
+/// possibly stale value from when the suspend was queued).
+fn resolve_update_commit_hash(
+    app: &App,
+    cursor_index: usize,
+    subject: &str,
+    short_hint: &str,
+) -> Result<String> {
+    if let Some(p) = app.stack.patches.get(cursor_index) {
+        if p.subject == subject {
+            return Ok(p.hash.clone());
+        }
+    }
+    if let Some(p) = app.stack.patches.iter().find(|p| p.subject == subject) {
+        return Ok(p.hash.clone());
+    }
+    Err(color_eyre::eyre::eyre!(
+        "Stack no longer has commit {:?} at the expected position (hint {}). \
+         Try reloading the TUI or pressing \x1b[1;32mr\x1b[0m to refresh after a pull/rebase.",
+        subject,
+        short_hint
+    ))
+}
+
 /// Submit a commit as a PR: open editor for description, then submit.
 fn handle_submit_commit(
     app: &mut App,
@@ -617,7 +641,9 @@ fn handle_submit_commit(
 /// Update an existing PR with progress display.
 fn handle_update_pr(app: &mut App, hash: &str, subject: &str, cursor_index: usize) -> Result<()> {
     clear_screen();
-    let short = &hash[..7.min(hash.len())];
+    let hash_full =
+        resolve_update_commit_hash(app, cursor_index, subject, &hash[..7.min(hash.len())])?;
+    let short = &hash_full[..7.min(hash_full.len())];
 
     let repo = repo_loader::open_resolved()?;
 
@@ -663,11 +689,11 @@ fn handle_update_pr(app: &mut App, hash: &str, subject: &str, cursor_index: usiz
     println!();
     println!("    \x1b[33mForce-pushing {} → {}\x1b[0m", short, pr_base);
 
-    match app.forge.update(&repo, hash, subject, &pr_base) {
+    match app.forge.update(&repo, &hash_full, subject, &pr_base) {
         Ok(msg) => {
             println!();
             println!("  \x1b[32m✓ {}\x1b[0m", msg);
-            let _ = app.reload_stack();
+            app.reload_stack()?;
             app.forge.save_sync_state(&repo, &app.stack.patches);
             app.notify(msg);
         }
@@ -938,8 +964,11 @@ fn handle_pull_remote(app: &mut App) -> Result<()> {
     let diverged_branches: std::collections::HashSet<String> =
         diverged.iter().map(|(b, _)| b.clone()).collect();
 
-    let mut subject_to_remote: std::collections::HashMap<String, String> =
+    // Map both subject and full commit hash → remote ref so rebase "edit" stops still match
+    // after subjects are normalized differently than `git log -1 --format=%s`.
+    let mut merge_sources: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
+    let mut expected_merges = 0usize;
     for patch in patches.iter() {
         if patch.status != crate::core::stack::PatchStatus::Submitted {
             continue;
@@ -955,14 +984,16 @@ fn handle_pull_remote(app: &mut App) -> Result<()> {
         }
 
         if let Some(remote_ref) = app.forge.get_remote_ref(&repo, patch) {
-            subject_to_remote.insert(patch.subject.clone(), remote_ref);
+            merge_sources.insert(patch.subject.clone(), remote_ref.clone());
+            merge_sources.insert(patch.hash.clone(), remote_ref);
+            expected_merges += 1;
         }
     }
 
     // Restore working branch if get_remote_ref changed it (e.g. Phabricator arc patch)
     let _ = repo.git_pub(&["checkout", "--quiet", &working_branch]);
 
-    if subject_to_remote.is_empty() {
+    if expected_merges == 0 {
         println!("  \x1b[31m⚠ Could not get remote refs for any diverged PRs.\x1b[0m");
         println!();
         println!("  Press \x1b[1;32mEnter\x1b[0m to return.");
@@ -1013,16 +1044,26 @@ fn handle_pull_remote(app: &mut App) -> Result<()> {
             break;
         }
 
-        // Get current commit's subject to identify it
-        let subject = repo
+        // Match this rebase stop to a diverged PR via subject and/or pre-amend commit hash.
+        let cur_subject = repo
             .git_pub(&["log", "-1", "--format=%s"])
             .unwrap_or_default()
             .trim()
             .to_string();
+        let head = repo
+            .git_pub(&["rev-parse", "HEAD"])
+            .unwrap_or_default()
+            .trim()
+            .to_string();
 
-        // Check if this commit has a remote ref to merge
-        if let Some(remote_ref) = subject_to_remote.get(&subject) {
-            println!("    \x1b[36mMerging remote changes for: {}\x1b[0m", subject);
+        if let Some(remote_ref) = merge_sources
+            .get(&cur_subject)
+            .or_else(|| merge_sources.get(&head))
+        {
+            println!(
+                "    \x1b[36mMerging remote changes for: {}\x1b[0m",
+                cur_subject
+            );
 
             // Merge remote changes into our commit (preserves both local and remote edits)
             let merge_result = Command::new("git")
@@ -1063,7 +1104,7 @@ fn handle_pull_remote(app: &mut App) -> Result<()> {
                         }
                         'a' => {
                             let _ = repo.rebase_abort();
-                            for ref_name in subject_to_remote.values() {
+                            for ref_name in merge_sources.values() {
                                 if ref_name.starts_with("pgit-temp-patch-") {
                                     let _ = repo.git_pub(&["branch", "-D", ref_name]);
                                 }
@@ -1151,21 +1192,35 @@ fn handle_pull_remote(app: &mut App) -> Result<()> {
     }
 
     // Clean up Phabricator temp branches
-    for ref_name in subject_to_remote.values() {
+    let unique_remote_refs: std::collections::HashSet<_> =
+        merge_sources.values().cloned().collect();
+    for ref_name in unique_remote_refs {
         if ref_name.starts_with("pgit-temp-patch-") {
-            let _ = repo.git_pub(&["branch", "-D", ref_name]);
+            let _ = repo.git_pub(&["branch", "-D", &ref_name]);
         }
+    }
+
+    if merged_count < expected_merges {
+        println!();
+        println!(
+            "  \x1b[33m⚠ Merged remote into only {} of {} diverged PR(s).\x1b[0m",
+            merged_count, expected_merges
+        );
+        println!(
+            "  Updating before fixing this may \x1b[1;33moverwrite\x1b[0m remote-only commits."
+        );
+        println!("  Re-run pull after fixing stack/rebase, or merge manually on the PR branch.");
     }
 
     // Restore working branch in case rebase left us elsewhere
     let _ = repo.git_pub(&["checkout", "--quiet", &working_branch]);
 
-    let _ = app.reload_stack();
+    app.reload_stack()?;
 
     clear_screen();
     println!();
     println!(
-        "  \x1b[32m✓ Pulled remote changes for {} PRs.\x1b[0m",
+        "  \x1b[32m✓ Pulled remote changes for {} PR(s).\x1b[0m",
         merged_count
     );
     println!();
