@@ -104,14 +104,12 @@ pub fn handle_normal(app: &mut App, key: KeyEvent) {
         KeyCode::Char('i') => app.show_insert_choice(),
 
         // Remove commit (with confirm)
-        KeyCode::Char('x') => {
-            if !app.stack.is_empty() {
-                let subject = app.stack.patches[app.cursor].subject.clone();
-                app.mode = Mode::Confirm {
-                    prompt: format!("Remove '{}'? (y/n)", subject),
-                    action: PendingAction::Drop,
-                };
-            }
+        KeyCode::Char('x') if !app.stack.is_empty() => {
+            let subject = app.stack.patches[app.cursor].subject.clone();
+            app.mode = Mode::Confirm {
+                prompt: format!("Remove '{}'? (y/n)", subject),
+                action: PendingAction::Drop,
+            };
         }
 
         // Rebase onto base branch
@@ -211,10 +209,10 @@ pub fn handle_diff_view(app: &mut App, key: KeyEvent) {
             app.mode = Mode::Normal;
             app.diff_content.clear();
         }
-        KeyCode::Char('j') | KeyCode::Down => {
-            if app.diff_scroll < app.diff_content.len().saturating_sub(1) {
-                app.diff_scroll += 1;
-            }
+        KeyCode::Char('j') | KeyCode::Down
+            if app.diff_scroll < app.diff_content.len().saturating_sub(1) =>
+        {
+            app.diff_scroll += 1;
         }
         KeyCode::Char('k') | KeyCode::Up => {
             app.diff_scroll = app.diff_scroll.saturating_sub(1);
