@@ -5,7 +5,7 @@ use color_eyre::{eyre::eyre, Result};
 
 use super::Forge;
 use crate::core::stack::{PatchEntry, PatchStatus};
-use crate::git::ops::{Repo, sed_inplace_shell_prefix};
+use crate::git::ops::{sed_inplace_shell_prefix, Repo};
 
 /// Phabricator integration via `arc` CLI.
 ///

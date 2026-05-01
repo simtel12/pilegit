@@ -280,11 +280,7 @@ impl Repo {
     pub fn rebase_break_after(&self, short_hash: &str) -> Result<bool> {
         let base = self.base()?;
         let abbr = self.abbrev(short_hash);
-        let sed_cmd = format!(
-            "{} '/^pick {}/a break'",
-            sed_inplace_shell_prefix(),
-            abbr
-        );
+        let sed_cmd = format!("{} '/^pick {}/a break'", sed_inplace_shell_prefix(), abbr);
         let _result = Command::new("git")
             .current_dir(&self.workdir)
             .env("GIT_SEQUENCE_EDITOR", &sed_cmd)
@@ -316,11 +312,7 @@ impl Repo {
                 format!("s/^pick {}/squash {}/", abbr, abbr)
             })
             .collect();
-        let seq_editor = format!(
-            "{} '{}'",
-            sed_inplace_shell_prefix(),
-            sed_parts.join("; ")
-        );
+        let seq_editor = format!("{} '{}'", sed_inplace_shell_prefix(), sed_parts.join("; "));
 
         // Write desired message to temp file. GIT_EDITOR will copy it over
         // git's proposed squash message when prompted.
