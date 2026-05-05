@@ -7,7 +7,8 @@ use std::process::Command;
 
 use color_eyre::Result;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind},
+    cursor::Show,
+    event::{self, DisableBracketedPaste, Event, KeyCode, KeyEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -63,7 +64,7 @@ pub fn run() -> Result<()> {
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic| {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        let _ = execute!(io::stdout(), LeaveAlternateScreen, Show);
         original_hook(panic);
     }));
 
@@ -81,6 +82,7 @@ pub fn run() -> Result<()> {
         // Restore terminal
         disable_raw_mode()?;
         execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+        prepare_terminal_for_external_editor()?;
 
         if app.should_quit {
             break;
@@ -192,6 +194,15 @@ fn get_editor() -> String {
     std::env::var("EDITOR")
         .or_else(|_| std::env::var("VISUAL"))
         .unwrap_or_else(|_| "nano".to_string())
+}
+
+/// Ratatui hides the cursor while drawing; `clear_screen` / full-screen clears can leave it hidden
+/// on some terminals. Restore visibility (and normal paste mode) before spawning nano/vim/etc.
+fn prepare_terminal_for_external_editor() -> Result<()> {
+    let mut stdout = io::stdout();
+    execute!(stdout, Show, DisableBracketedPaste)?;
+    stdout.flush()?;
+    Ok(())
 }
 
 /// Read a single keypress using crossterm (no need to press Enter).
@@ -394,6 +405,7 @@ fn handle_squash_commits(
         ],
     );
 
+    prepare_terminal_for_external_editor()?;
     let status = Command::new(&editor).arg(&tmp_path).status();
 
     match status {
@@ -550,6 +562,7 @@ fn handle_submit_commit(
         ],
     );
 
+    prepare_terminal_for_external_editor()?;
     let status = Command::new(&editor).arg(&tmp_path).status();
 
     match status {
