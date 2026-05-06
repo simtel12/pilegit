@@ -599,11 +599,16 @@ impl Repo {
         }
     }
 
-    /// Force-update a branch to point at a hash, then push.
-    /// If we're already on the branch, skip the branch -f (it's already at HEAD).
+    /// Force-update a branch to point at `hash`, then push.
+    /// Always aligns the ref to `hash` when it differs from the branch tip — even if that branch
+    /// is currently checked out (otherwise `git push` would publish the wrong commit).
     pub fn force_update_and_push(&self, branch: &str, hash: &str) -> Result<()> {
-        let current = self.get_current_branch().unwrap_or_default();
-        if current != branch {
+        let hash = hash.trim();
+        let tip = self
+            .git_pub(&["rev-parse", "--verify", branch])
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        if tip != hash {
             self.git(&["branch", "-f", branch, hash])?;
         }
         self.git(&["push", "-f", "origin", branch])?;
